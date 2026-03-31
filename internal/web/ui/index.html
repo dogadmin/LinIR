@@ -14,6 +14,7 @@
     <span class="subtitle">应急响应取证仪表盘</span>
   </div>
   <div class="header-right">
+    <input type="text" id="yara-rules" class="header-input" placeholder="YARA 规则路径（文件或目录，可选）" title="输入 YARA 规则文件或目录的绝对路径，目录会自动递归加载 .yar/.yara/.rule 文件">
     <span id="status" class="badge badge-waiting">等待采集</span>
     <button id="btn-collect" class="btn btn-primary" onclick="startCollect()">开始采集</button>
     <button id="btn-export" class="btn btn-secondary" onclick="exportJSON()" disabled>导出 JSON</button>

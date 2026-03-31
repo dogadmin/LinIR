@@ -159,22 +159,16 @@ func extractExecTarget(execStart string) string {
 
 func flagSystemdRisks(item *model.PersistenceItem, unit *sysparse.SystemdUnit) {
 	target := item.Target
-	// 目标在临时目录
+	// 目标在临时目录——明确可疑
 	if strings.HasPrefix(target, "/tmp/") || strings.HasPrefix(target, "/var/tmp/") || strings.HasPrefix(target, "/dev/shm/") {
 		item.RiskFlags = append(item.RiskFlags, "target_in_tmp")
 	}
-	// ExecStart 使用 shell 执行
-	if strings.Contains(unit.ExecStart, "/bin/sh ") || strings.Contains(unit.ExecStart, "/bin/bash ") {
-		item.RiskFlags = append(item.RiskFlags, "shell_exec")
-	}
-	// 环境变量中设置 LD_PRELOAD
+	// 环境变量中设置 LD_PRELOAD——明确可疑
 	if strings.Contains(unit.Environment, "LD_PRELOAD") {
 		item.RiskFlags = append(item.RiskFlags, "ld_preload_in_env")
 	}
-	// 用户目录下的 unit 文件（非标准路径下的自定义 service）
-	if strings.HasPrefix(item.Path, "/home/") || strings.HasPrefix(target, "/home/") {
-		item.RiskFlags = append(item.RiskFlags, "user_home_path")
-	}
+	// 注意：不再标记 shell_exec（/bin/bash 在 ExecStart 中是正常的）
+	// 注意：不再标记 user_home_path（用户级 systemd service 是合法的）
 }
 
 // ========== cron ==========
@@ -331,24 +325,20 @@ func flagCronRisks(item *model.PersistenceItem, e sysparse.CrontabEntry) {
 	cmd := e.Command
 	target := item.Target
 
+	// 只保留真正可疑的 cron 标记
 	if strings.HasPrefix(target, "/tmp/") || strings.HasPrefix(target, "/var/tmp/") || strings.HasPrefix(target, "/dev/shm/") {
 		item.RiskFlags = append(item.RiskFlags, "target_in_tmp")
-	}
-	if strings.Contains(cmd, "curl ") || strings.Contains(cmd, "wget ") {
-		item.RiskFlags = append(item.RiskFlags, "downloads_from_network")
-	}
-	if strings.Contains(cmd, "| bash") || strings.Contains(cmd, "| sh") || strings.Contains(cmd, "|bash") || strings.Contains(cmd, "|sh") {
-		item.RiskFlags = append(item.RiskFlags, "pipe_to_shell")
-	}
-	if strings.Contains(cmd, "base64") {
-		item.RiskFlags = append(item.RiskFlags, "base64_usage")
 	}
 	if strings.Contains(cmd, "/dev/tcp/") {
 		item.RiskFlags = append(item.RiskFlags, "dev_tcp_reverse_shell")
 	}
-	if e.Minute == "@reboot" {
-		item.RiskFlags = append(item.RiskFlags, "runs_at_reboot")
+	// curl|bash 管道——可疑但需组合才有意义
+	if (strings.Contains(cmd, "curl ") || strings.Contains(cmd, "wget ")) &&
+		(strings.Contains(cmd, "| bash") || strings.Contains(cmd, "| sh") || strings.Contains(cmd, "|bash") || strings.Contains(cmd, "|sh")) {
+		item.RiskFlags = append(item.RiskFlags, "pipe_to_shell")
 	}
+	// 注意：不再单独标记 downloads_from_network、base64_usage、runs_at_reboot、output_suppressed、nohup_usage
+	// 这些在正常运维中极为常见
 }
 
 func flagScriptRisks(item *model.PersistenceItem, path string) {
@@ -444,20 +434,12 @@ func checkProfileFile(path, scope string) *model.PersistenceItem {
 		substr string
 		flag   string
 	}{
+		// 只保留明确的恶意指标，不标记正常系统行为
 		{"export LD_PRELOAD", "ld_preload_export"},
 		{"export DYLD_INSERT", "dyld_inject_export"},
 		{"/dev/tcp/", "dev_tcp_reverse_shell"},
-		{"base64 -d", "base64_decode"},
-		{"base64 --decode", "base64_decode"},
-		{"eval ", "eval_usage"},
-		{"curl ", "network_download"},
-		{"wget ", "network_download"},
-		{"python -c", "script_oneliner"},
-		{"perl -e", "script_oneliner"},
-		{"alias ps=", "command_alias_override"},
-		{"alias ls=", "command_alias_override"},
-		{"alias netstat=", "command_alias_override"},
-		{"alias ss=", "command_alias_override"},
+		// 注意：不再标记 eval、base64、curl、wget、python -c、perl -e、alias 覆盖
+		// 这些在默认系统 profile 中极为常见，标记它们只会产生噪音
 	}
 
 	for _, p := range patterns {

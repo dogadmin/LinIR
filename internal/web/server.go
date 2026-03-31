@@ -9,8 +9,10 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"os"
 	"os/exec"
 	"runtime"
+	"strings"
 	"sync"
 	"time"
 
@@ -94,10 +96,39 @@ func (s *Server) handleCollect(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(r.Context(), time.Duration(s.cfg.Timeout)*time.Second)
 	defer cancel()
 
+	// 从请求中读取可选的 YARA 规则路径
+	yaraRules := ""
+	if r.Header.Get("Content-Type") == "application/json" {
+		var body struct {
+			YaraRules string `json:"yara_rules"`
+		}
+		json.NewDecoder(r.Body).Decode(&body)
+		yaraRules = body.YaraRules
+	} else {
+		yaraRules = r.FormValue("yara_rules")
+	}
+
+	// 验证 YARA 规则路径安全性
+	if yaraRules != "" {
+		// 必须是绝对路径，防止路径遍历
+		if !strings.HasPrefix(yaraRules, "/") {
+			http.Error(w, "YARA 规则路径必须是绝对路径", http.StatusBadRequest)
+			return
+		}
+		// 检查路径是否存在
+		if _, err := os.Stat(yaraRules); err != nil {
+			http.Error(w, "YARA 规则路径不存在: "+yaraRules, http.StatusBadRequest)
+			return
+		}
+	}
+
 	// GUI 模式下不写文件输出，只返回 JSON
 	guiCfg := *s.cfg
 	guiCfg.OutputFormat = "json"
 	guiCfg.Quiet = true
+	if yaraRules != "" {
+		guiCfg.YaraRules = yaraRules
+	}
 
 	application, err := app.New(&guiCfg)
 	if err != nil {

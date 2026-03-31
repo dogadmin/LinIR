@@ -160,10 +160,10 @@ func (c *ProcessCollector) collectOne(pid int, bootTime, clockTick uint64, userC
 	return proc, nil
 }
 
-// flagSuspicious 基于采集到的数据标记可疑项
-// 这是初步标记，后续 process.Analyze() 会做更深入的分析
+// flagSuspicious 仅标记真正可疑的采集时指标。
+// 原则：单一正常行为不标记，只标记明确异常。
 func (c *ProcessCollector) flagSuspicious(proc *model.ProcessInfo) {
-	// exe 路径在临时目录
+	// exe 在临时目录——明确可疑
 	tmpPrefixes := []string{"/tmp/", "/var/tmp/", "/dev/shm/", "/dev/mqueue/"}
 	for _, prefix := range tmpPrefixes {
 		if strings.HasPrefix(proc.Exe, prefix) {
@@ -172,37 +172,11 @@ func (c *ProcessCollector) flagSuspicious(proc *model.ProcessInfo) {
 		}
 	}
 
-	// exe 路径为空但 cmdline 不为空（可能是内核线程，也可能是隐藏进程）
+	// exe 不可读但有 cmdline（非内核线程）——降低可信度但不一定恶意
 	if proc.Exe == "" && len(proc.Cmdline) > 0 {
-		proc.SuspiciousFlags = append(proc.SuspiciousFlags, "exe_unreadable")
 		proc.Confidence = "medium"
 	}
 
-	// 常见解释器进程
-	interpreters := []string{"python", "perl", "ruby", "bash", "sh", "dash", "zsh",
-		"php", "node", "lua", "awk", "nawk", "gawk"}
-	baseName := proc.Name
-	for _, interp := range interpreters {
-		if baseName == interp || strings.HasPrefix(baseName, interp) {
-			proc.SuspiciousFlags = append(proc.SuspiciousFlags, "interpreter")
-			break
-		}
-	}
-
-	// 进程名和 exe 基本名不一致（可能在伪装进程名）
-	if proc.Exe != "" && proc.Name != "" {
-		exeBase := basename(proc.Exe)
-		if exeBase != "" && exeBase != proc.Name && !strings.HasPrefix(exeBase, proc.Name) {
-			proc.SuspiciousFlags = append(proc.SuspiciousFlags, "name_exe_mismatch")
-		}
-	}
-}
-
-// basename 返回路径的最后一个组件
-func basename(path string) string {
-	idx := strings.LastIndexByte(path, '/')
-	if idx < 0 {
-		return path
-	}
-	return path[idx+1:]
+	// 注意：不再单独标记 "interpreter"——bash/python/perl 运行本身不是威胁指标。
+	// 可疑组合行为在 process.Analyze() 中检测。
 }

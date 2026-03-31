@@ -209,9 +209,11 @@ func (a *App) collectNetwork(ctx context.Context) {
 	conns, err := a.collectors.Network.CollectConnections(ctx)
 	if err != nil {
 		a.addError("network", err)
-		return
+		// 不 return——即使有错误（如 SIP 降级），仍保留已采集到的数据
 	}
-	a.result.Connections = conns
+	if len(conns) > 0 {
+		a.result.Connections = conns
+	}
 }
 
 func (a *App) collectPersistence(ctx context.Context) {

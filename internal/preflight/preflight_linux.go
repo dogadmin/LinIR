@@ -268,25 +268,15 @@ func checkProfileFile(result *model.PreflightResult, path string) {
 	content := string(data)
 
 	// 可疑模式
+	// 只检查明确的恶意指标，不标记默认系统配置中的正常内容
+	// eval/base64/curl/wget/alias 在默认 /etc/profile 和 bash.bashrc 中极为常见
 	suspiciousPatterns := []struct {
 		pattern string
 		desc    string
 	}{
-		{"base64", "base64 编解码(可能用于混淆)"},
-		{"curl ", "curl 下载命令"},
-		{"wget ", "wget 下载命令"},
-		{"eval ", "eval 执行(常见于混淆后门)"},
 		{"/dev/tcp/", "bash /dev/tcp 网络连接(反弹 shell 常用手法)"},
-		{"nc -", "netcat 调用"},
-		{"ncat ", "ncat 调用"},
-		{"python -c", "python 一行命令执行"},
-		{"perl -e", "perl 一行命令执行"},
 		{"export LD_PRELOAD", "LD_PRELOAD 设置"},
 		{"export DYLD_INSERT", "DYLD 注入设置"},
-		{"alias ls=", "ls 别名覆盖"},
-		{"alias ps=", "ps 别名覆盖"},
-		{"alias netstat=", "netstat 别名覆盖"},
-		{"alias ss=", "ss 别名覆盖"},
 	}
 
 	for _, sp := range suspiciousPatterns {

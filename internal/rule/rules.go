@@ -1,31 +1,43 @@
 package rule
 
-// Rule defines a single scoring rule.
+// Rule 定义单条评分规则
 type Rule struct {
 	Name        string
-	Domain      string // "process"|"network"|"persistence"|"integrity"|"yara"
+	Domain      string
 	Description string
 	Score       int
-	Severity    string // "low"|"medium"|"high"|"critical"
+	Severity    string
 }
 
-// DefaultRules returns the built-in scoring rules.
-// These follow the weighted model from the design spec.
+// DefaultRules 返回内置评分规则。
+// 设计原则：只为明确的入侵指标评分，不为正常系统行为评分。
+// 每条规则应该是：如果在干净系统上触发，安全人员会认为这是误报。
 func DefaultRules() []Rule {
 	return []Rule{
-		{Name: "interpreter_network", Domain: "process", Description: "Interpreter process has active network connection", Score: 20, Severity: "medium"},
-		{Name: "exe_in_tmp", Domain: "process", Description: "Process executable in /tmp, /var/tmp, or /dev/shm", Score: 25, Severity: "high"},
-		{Name: "exe_deleted", Domain: "process", Description: "Process executable deleted from disk", Score: 20, Severity: "medium"},
-		{Name: "suspicious_parent", Domain: "process", Description: "Suspicious parent-child process relationship", Score: 15, Severity: "medium"},
-		{Name: "persistence_exists", Domain: "persistence", Description: "Non-standard persistence mechanism found", Score: 25, Severity: "high"},
-		{Name: "persistence_target_missing", Domain: "persistence", Description: "Persistence target file does not exist", Score: 15, Severity: "medium"},
-		{Name: "persistence_in_tmp", Domain: "persistence", Description: "Persistence target in temporary directory", Score: 25, Severity: "high"},
-		{Name: "yara_hit", Domain: "yara", Description: "YARA rule matched", Score: 30, Severity: "high"},
-		{Name: "loader_injection", Domain: "integrity", Description: "Dynamic library preload/injection risk", Score: 30, Severity: "high"},
-		{Name: "visibility_anomaly", Domain: "integrity", Description: "Cross-source visibility anomaly detected", Score: 25, Severity: "high"},
-		{Name: "host_trust_low", Domain: "integrity", Description: "Host environment trust level is low", Score: 20, Severity: "medium"},
-		{Name: "rootkit_suspected", Domain: "integrity", Description: "Rootkit indicators detected", Score: 30, Severity: "critical"},
-		{Name: "orphan_connection", Domain: "network", Description: "Network connection with no owning process", Score: 20, Severity: "medium"},
-		{Name: "raw_socket", Domain: "network", Description: "Raw socket detected", Score: 15, Severity: "medium"},
+		// 进程——明确异常
+		{Name: "exe_in_tmp", Domain: "process", Description: "进程可执行文件位于临时目录", Score: 25, Severity: "high"},
+		{Name: "exe_deleted", Domain: "process", Description: "进程可执行文件已从磁盘删除", Score: 10, Severity: "medium"},
+		{Name: "webshell_indicator", Domain: "process", Description: "Web 服务器直接派生 shell 进程", Score: 25, Severity: "high"},
+		{Name: "fake_kthread", Domain: "process", Description: "进程伪装内核线程(PPID≠2)", Score: 20, Severity: "high"},
+		{Name: "persistent_networked", Domain: "process", Description: "持久化目标正在运行且有网络连接", Score: 15, Severity: "medium"},
+
+		// 网络——明确异常
+		{Name: "suspicious_port", Domain: "network", Description: "连接到已知 C2 端口", Score: 20, Severity: "high"},
+		{Name: "orphan_connections", Domain: "network", Description: "活跃连接无归属进程", Score: 10, Severity: "medium"},
+
+		// 持久化——明确异常
+		{Name: "persist_in_tmp", Domain: "persistence", Description: "持久化目标位于临时目录", Score: 25, Severity: "high"},
+		{Name: "ld_preload", Domain: "persistence", Description: "系统级 ld.so.preload 注入", Score: 30, Severity: "high"},
+		{Name: "reverse_shell", Domain: "persistence", Description: "/dev/tcp 反弹 shell 模式", Score: 30, Severity: "critical"},
+		{Name: "pipe_shell", Domain: "persistence", Description: "curl/wget 管道到 shell 执行", Score: 15, Severity: "medium"},
+		{Name: "persist_active_net", Domain: "persistence", Description: "持久化目标正在运行且有网络连接", Score: 15, Severity: "medium"},
+
+		// 完整性——明确异常
+		{Name: "rootkit_suspected", Domain: "integrity", Description: "多项可见性异常指向 rootkit", Score: 30, Severity: "critical"},
+		{Name: "module_mismatch", Domain: "integrity", Description: "内核模块视图不一致", Score: 25, Severity: "high"},
+		{Name: "host_trust_low", Domain: "integrity", Description: "主机环境可信度低", Score: 20, Severity: "medium"},
+
+		// YARA
+		{Name: "yara_hit", Domain: "yara", Description: "YARA 规则命中", Score: 30, Severity: "high"},
 	}
 }

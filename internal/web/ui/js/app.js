@@ -11,7 +11,13 @@ async function startCollect() {
   status.textContent = '采集中...';
 
   try {
-    const resp = await fetch('/api/collect', { method: 'POST' });
+    const yaraRules = (document.getElementById('yara-rules').value || '').trim();
+    const body = yaraRules ? JSON.stringify({ yara_rules: yaraRules }) : '{}';
+    const resp = await fetch('/api/collect', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: body,
+    });
     if (!resp.ok) throw new Error(await resp.text());
     resultData = await resp.json();
     renderAll(resultData);

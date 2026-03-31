@@ -171,20 +171,13 @@ func checkDarwinShellProfiles(result *model.PreflightResult) {
 		}
 		content := string(data)
 
+		// 只检查明确的恶意指标
 		suspiciousPatterns := []struct {
 			pattern string
 			desc    string
 		}{
 			{"DYLD_INSERT_LIBRARIES", "DYLD 注入设置"},
-			{"DYLD_LIBRARY_PATH", "DYLD 库路径覆盖"},
-			{"base64", "base64 编解码"},
-			{"curl ", "curl 下载"},
-			{"wget ", "wget 下载"},
-			{"eval ", "eval 执行"},
-			{"python -c", "python 单行执行"},
-			{"osascript", "AppleScript 执行"},
-			{"alias ls=", "ls 别名覆盖"},
-			{"alias ps=", "ps 别名覆盖"},
+			{"/dev/tcp/", "反弹 shell 模式"},
 		}
 
 		for _, sp := range suspiciousPatterns {

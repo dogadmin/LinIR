@@ -28,10 +28,7 @@ func Run(result *model.CollectionResult) {
 	// 1. 关联连接到进程：填充 ProcessName
 	enrichConnectionProcessName(result.Connections, procByPID)
 
-	// 2. 标记联网的解释器进程
-	flagNetworkedInterpreters(result.Processes, connsByPID)
-
-	// 3. 关联持久化项到运行中的进程
+	// 2. 关联持久化项到运行中的进程
 	correlatePersistenceToProcess(result.Persistence, procByExe, connsByPID)
 }
 
@@ -78,29 +75,8 @@ func enrichConnectionProcessName(conns []model.ConnectionInfo, procByPID map[int
 	}
 }
 
-// flagNetworkedInterpreters 标记有活跃网络连接的解释器进程
-func flagNetworkedInterpreters(procs []model.ProcessInfo, connsByPID map[int][]model.ConnectionInfo) {
-	for i := range procs {
-		p := &procs[i]
-		conns, hasConns := connsByPID[p.PID]
-		if !hasConns || len(conns) == 0 {
-			continue
-		}
-
-		// 检查是否是解释器
-		if !isInterpreter(p.Name) {
-			continue
-		}
-
-		// 检查是否有 ESTABLISHED 外连
-		for _, c := range conns {
-			if c.State == "ESTABLISHED" && c.RemotePort > 0 {
-				addProcFlag(p, "interpreter_established_outbound")
-				break
-			}
-		}
-	}
-}
+// 注意：不再标记 interpreter_established_outbound
+// 解释器（python/perl/bash）联网本身不是威胁指标（pip/npm/apt 都会触发）
 
 // correlatePersistenceToProcess 关联持久化项到运行中的进程
 func correlatePersistenceToProcess(persist []model.PersistenceItem, procByExe map[string]*model.ProcessInfo, connsByPID map[int][]model.ConnectionInfo) {

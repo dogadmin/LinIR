@@ -5,6 +5,7 @@ package macos
 import (
 	"encoding/binary"
 	"fmt"
+	"syscall"
 	"unsafe"
 
 	"golang.org/x/sys/unix"
@@ -184,8 +185,24 @@ func parseSocketBuf(buf []byte, pid int) (*model.ConnectionInfo, error) {
 
 // pidConnResult 封装单个 PID 的采集结果和失败计数
 type pidConnResult struct {
-	conns     []model.ConnectionInfo
-	parseFail int // parseSocketBuf 返回错误的次数
+	conns        []model.ConnectionInfo
+	parseFail    int // parseSocketBuf 返回错误的次数
+	accessDenied int // listProcFDs 因 SIP/权限返回 EPERM/EACCES 的次数
+}
+
+// isAccessDeniedError 检查错误是否为 SIP/权限限制导致的访问拒绝
+func isAccessDeniedError(err error) bool {
+	if err == nil {
+		return false
+	}
+	// 直接比较 syscall.Errno
+	if errno, ok := err.(syscall.Errno); ok {
+		switch errno {
+		case syscall.EPERM, syscall.EACCES, syscall.ESRCH:
+			return true
+		}
+	}
+	return false
 }
 
 // collectPidConnections 枚举一个进程的所有网络连接
@@ -194,6 +211,9 @@ func collectPidConnections(pid int) pidConnResult {
 
 	fds, err := listProcFDs(pid)
 	if err != nil {
+		if isAccessDeniedError(err) {
+			result.accessDenied = 1
+		}
 		return result
 	}
 

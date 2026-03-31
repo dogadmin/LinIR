@@ -37,7 +37,19 @@ header {
 .header-left { display: flex; align-items: baseline; gap: 12px; }
 header h1 { font-size: 20px; font-weight: 700; color: var(--accent); }
 .subtitle { color: var(--text2); font-size: 13px; }
-.header-right { display: flex; align-items: center; gap: 10px; }
+.header-right { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.header-input {
+  padding: 6px 12px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  color: var(--text);
+  font-size: 12px;
+  width: 280px;
+  outline: none;
+}
+.header-input:focus { border-color: var(--accent); }
+.header-input::placeholder { color: var(--text2); }
 
 .btn {
   padding: 7px 16px;
