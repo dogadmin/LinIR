@@ -133,7 +133,7 @@ condition: any of ($s*)           // 通配符集合
 | 参数 | 短写 | 说明 | 默认值 |
 |---|---|---|---|
 | `--output-dir` | `-o` | 输出文件保存目录 | `.`（当前目录）|
-| `--format` | | 输出格式，可选 `json`、`text`、`both` | `both` |
+| `--format` | | 输出格式：`json`、`text`、`csv`、`both`（json+text）、`all`（json+text+csv） | `both` |
 | `--bundle` | | 额外生成 tar.gz 分诊包 | 关闭 |
 | `--force` | | 即使预检发现高风险也强制继续采集 | 关闭 |
 | `--verbose` | `-v` | 输出详细运行日志 | 关闭 |
@@ -372,6 +372,40 @@ Shell Profile Anomaly: /etc/profile.d/backdoor.sh: 发现可疑模式 'curl ' (n
 ---
 
 ## 输出格式
+
+LinIR 支持四种输出格式：
+
+| 格式 | 文件 | 说明 |
+|---|---|---|
+| **JSON** | `linir-<主机名>-<ID>.json` | 结构化证据，供 SIEM/AI/自动化分析 |
+| **文本** | `linir-<主机名>-<ID>.txt` | 人类可读摘要报告 |
+| **CSV** | `linir-<主机名>-<ID>-*.csv` | 7 个 CSV 表格，可直接用 Excel/WPS 打开 |
+| **分诊包** | `linir-bundle-<主机名>-<ID>.tar.gz` | 按模块拆分的 JSON 归档 |
+
+### CSV 表格说明
+
+CSV 模式生成以下表格（均带 UTF-8 BOM，Excel 直接打开不乱码）：
+
+| CSV 文件 | 内容 |
+|---|---|
+| `*-summary.csv` | 概览：主机信息、可信度、风险评分、异常汇总 |
+| `*-processes.csv` | 进程表：PID、PPID、用户、进程名、exe 路径、命令行、可疑标记 |
+| `*-connections.csv` | 连接表：协议、地址端口、状态、PID、进程名、可疑标记 |
+| `*-persistence.csv` | 持久化表：类型、路径、目标、风险标记、解析字段 |
+| `*-evidence.csv` | 评分证据表：总分 + 逐条证据明细（域、规则、描述、分值） |
+| `*-yara.csv` | YARA 命中表：规则名、目标路径、命中字符串、关联 PID |
+| `*-integrity.csv` | 完整性表：各类视图不一致、内核 taint、建议操作 |
+
+```bash
+# 生成 CSV 用于 Excel 分析
+sudo ./linir collect --format csv
+
+# 同时生成全部格式（JSON + 文本 + CSV）
+sudo ./linir collect --format all
+
+# JSON + 文本（默认，向后兼容）
+sudo ./linir collect --format both
+```
 
 ### JSON 结构概览
 

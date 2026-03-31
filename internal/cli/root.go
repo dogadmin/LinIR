@@ -25,7 +25,7 @@ and cross-source validation.`,
 
 	pf := root.PersistentFlags()
 	pf.StringVarP(&cfg.OutputDir, "output-dir", "o", cfg.OutputDir, "Output directory")
-	pf.StringVar(&cfg.OutputFormat, "format", cfg.OutputFormat, "Output format: json, text, both")
+	pf.StringVar(&cfg.OutputFormat, "format", cfg.OutputFormat, "Output format: json, text, csv, both, all")
 	pf.BoolVar(&cfg.BundleOutput, "bundle", cfg.BundleOutput, "Create triage bundle (tar.gz)")
 	pf.BoolVar(&cfg.Force, "force", cfg.Force, "Proceed despite preflight failures")
 	pf.BoolVarP(&cfg.Verbose, "verbose", "v", cfg.Verbose, "Verbose output")
