@@ -107,7 +107,21 @@ func (e *Engine) Run(ctx context.Context) error {
 	ticker := time.NewTicker(e.cfg.Interval)
 	defer ticker.Stop()
 
-	// 立即执行第一次
+	// 立即执行第一次，并输出状态（不需要 verbose）
+	conns, err := e.collectors.Network.CollectConnections(ctx)
+	connCount := len(conns)
+	if err != nil {
+		fmt.Printf("[WARN] 连接采集错误: %v\n", err)
+	}
+	fmt.Printf("[INFO] 首次扫描: 采集到 %d 条连接", connCount)
+	if connCount > 0 {
+		hits := MatchConnections(conns, e.iocStore)
+		fmt.Printf(", %d 条 IOC 命中", len(hits))
+	}
+	fmt.Println()
+	if connCount == 0 {
+		fmt.Println("[WARN] 未采集到任何连接，请检查是否以 root/sudo 运行")
+	}
 	e.scan(ctx)
 
 	for {

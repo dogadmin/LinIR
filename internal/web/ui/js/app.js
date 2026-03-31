@@ -407,6 +407,20 @@ function startWatchStream() {
     } catch (_) {}
   };
 
+  watchEventSource.addEventListener('status', function(e) {
+    try {
+      const st = JSON.parse(e.data);
+      let html = `<span class="badge badge-running">监控中</span> 扫描 #${st.scans} | 采集到 ${st.last_conns} 条连接 | ${st.events} 条命中`;
+      if (st.last_conns === 0) {
+        html += ' <span style="color:var(--red);font-weight:600">| 未采集到任何连接，请检查权限 (sudo)</span>';
+      }
+      if (st.last_err) {
+        html += ` <span style="color:var(--orange)">[${esc(st.last_err)}]</span>`;
+      }
+      document.getElementById('watch-status').innerHTML = html;
+    } catch (_) {}
+  });
+
   watchEventSource.addEventListener('done', function(e) {
     watchEventSource.close();
     watchEventSource = null;
@@ -449,25 +463,23 @@ function appendWatchEvent(evt) {
 
 async function runYaraScan() {
   const rulesPath = document.getElementById('yara-rules-path').value.trim();
-  const targetPath = document.getElementById('yara-target-path').value.trim();
   const status = document.getElementById('yara-status');
 
   if (!rulesPath) { alert('请输入 YARA 规则路径'); return; }
-  if (!targetPath) { alert('请输入扫描目标路径'); return; }
 
   document.getElementById('btn-yara-scan').disabled = true;
-  status.innerHTML = '<span class="badge badge-running">扫描中...</span>';
+  status.innerHTML = '<span class="badge badge-running">采集进程并扫描中...</span>';
 
   try {
     const resp = await fetch('/api/yara/scan', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ rules_path: rulesPath, target_path: targetPath }),
+      body: JSON.stringify({ rules_path: rulesPath }),
     });
     if (!resp.ok) throw new Error(await resp.text());
     const result = await resp.json();
 
-    status.innerHTML = `<span class="badge badge-done">扫描完成</span> 加载 ${result.rule_count} 条规则，命中 ${result.hit_count} 条`;
+    status.innerHTML = `<span class="badge badge-done">扫描完成</span> 加载 ${result.rule_count} 条规则，识别 ${result.target_count} 个目标，命中 ${result.hit_count} 条`;
     renderYaraHits(result.hits || []);
   } catch (e) {
     status.innerHTML = `<span class="badge badge-error">扫描失败: ${esc(e.message)}</span>`;
@@ -480,7 +492,7 @@ function renderYaraHits(hits) {
   const tbody = document.querySelector('#yara-table tbody');
   tbody.innerHTML = '';
   if (hits.length === 0) {
-    tbody.innerHTML = '<tr><td colspan="5" class="muted" style="text-align:center;padding:20px">无匹配结果</td></tr>';
+    tbody.innerHTML = '<tr><td colspan="6" class="muted" style="text-align:center;padding:20px">无匹配结果</td></tr>';
     return;
   }
   hits.forEach(h => {
@@ -490,6 +502,7 @@ function renderYaraHits(hits) {
       <td><strong>${esc(h.rule)}</strong></td>
       <td title="${esc(h.target_path)}">${esc(h.target_path)}</td>
       <td>${esc(h.target_type || 'file')}</td>
+      <td>${h.linked_pid || '—'}</td>
       <td>${(h.strings || []).map(s => '<code>' + esc(s) + '</code>').join(' ')}</td>
       <td><span class="sev-${sev}">${sev.toUpperCase()}</span></td>`;
     tbody.appendChild(tr);

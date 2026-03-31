@@ -39,9 +39,12 @@ type Server struct {
 	collecting bool
 
 	// watch 模式状态
-	watchCancel context.CancelFunc
-	watching    bool
-	watchEvents []watch.EnrichedEvent
+	watchCancel    context.CancelFunc
+	watching       bool
+	watchEvents    []watch.EnrichedEvent
+	watchScanCount int
+	watchLastConns int
+	watchLastErr   string
 }
 
 func NewServer(cfg *config.Config, port int) *Server {
@@ -282,7 +285,18 @@ func (s *Server) handleWatchStart(w http.ResponseWriter, r *http.Request) {
 		defer ticker.Stop()
 
 		scanOnce := func() {
-			conns, _ := collectors.Network.CollectConnections(ctx)
+			conns, err := collectors.Network.CollectConnections(ctx)
+
+			s.mu.Lock()
+			s.watchScanCount++
+			s.watchLastConns = len(conns)
+			if err != nil {
+				s.watchLastErr = err.Error()
+			} else {
+				s.watchLastErr = ""
+			}
+			s.mu.Unlock()
+
 			if len(conns) == 0 {
 				return
 			}
@@ -290,7 +304,6 @@ func (s *Server) handleWatchStart(w http.ResponseWriter, r *http.Request) {
 			if len(hits) == 0 {
 				return
 			}
-			// 预采集一次上下文，所有命中共享（避免 O(hits*procs) 性能问题）
 			cache := enricher.CollectCache(ctx)
 			for _, hit := range hits {
 				select {
@@ -398,7 +411,6 @@ func (s *Server) handleWatchStream(w http.ResponseWriter, r *http.Request) {
 		case <-r.Context().Done():
 			return
 		case <-ticker.C:
-			// 修复: 在锁内拷贝新事件切片，避免 slice alias 数据竞争
 			s.mu.Lock()
 			newCount := len(s.watchEvents)
 			var newEvents []watch.EnrichedEvent
@@ -407,9 +419,12 @@ func (s *Server) handleWatchStream(w http.ResponseWriter, r *http.Request) {
 				copy(newEvents, s.watchEvents[lastIdx:newCount])
 			}
 			watching := s.watching
+			scanCount := s.watchScanCount
+			lastConns := s.watchLastConns
+			lastErr := s.watchLastErr
 			s.mu.Unlock()
 
-			// 发送新事件（使用拷贝的数据，锁外操作）
+			// 发送新事件
 			for _, evt := range newEvents {
 				data, _ := json.Marshal(evt)
 				fmt.Fprintf(w, "data: %s\n\n", data)
@@ -417,8 +432,15 @@ func (s *Server) handleWatchStream(w http.ResponseWriter, r *http.Request) {
 			}
 			lastIdx = newCount
 
-			// 心跳
-			fmt.Fprintf(w, ": heartbeat watching=%v events=%d\n\n", watching, newCount)
+			// 发送扫描状态（named event，前端通过 addEventListener 接收）
+			statusJSON, _ := json.Marshal(map[string]interface{}{
+				"scans":      scanCount,
+				"last_conns": lastConns,
+				"last_err":   lastErr,
+				"events":     newCount,
+				"watching":   watching,
+			})
+			fmt.Fprintf(w, "event: status\ndata: %s\n\n", statusJSON)
 			flusher.Flush()
 
 			if !watching && lastIdx >= newCount {
@@ -494,7 +516,7 @@ func (s *Server) handleFsBrowse(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(result)
 }
 
-// handleYaraScan 独立于 collect 流程运行 YARA 扫描
+// handleYaraScan 采集当前进程/网络/持久化信息，用 YARA 扫描关联文件
 func (s *Server) handleYaraScan(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "需要 POST", http.StatusMethodNotAllowed)
@@ -502,24 +524,19 @@ func (s *Server) handleYaraScan(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var body struct {
-		RulesPath  string `json:"rules_path"`
-		TargetPath string `json:"target_path"`
+		RulesPath string `json:"rules_path"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		http.Error(w, "请求格式错误", http.StatusBadRequest)
 		return
 	}
 
-	if body.RulesPath == "" || body.TargetPath == "" {
-		http.Error(w, "规则路径和目标路径不能为空", http.StatusBadRequest)
+	if body.RulesPath == "" {
+		http.Error(w, "规则路径不能为空", http.StatusBadRequest)
 		return
 	}
 	if !filepath.IsAbs(body.RulesPath) {
 		http.Error(w, "规则路径必须是绝对路径", http.StatusBadRequest)
-		return
-	}
-	if !filepath.IsAbs(body.TargetPath) {
-		http.Error(w, "目标路径必须是绝对路径", http.StatusBadRequest)
 		return
 	}
 
@@ -537,28 +554,50 @@ func (s *Server) handleYaraScan(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(r.Context(), 120*time.Second)
 	defer cancel()
 
-	var hits []model.YaraHit
+	// 采集进程/网络/持久化，构建扫描目标
+	collectors, err := collector.NewPlatformCollectors()
+	if err != nil {
+		http.Error(w, "初始化采集器失败: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
 
-	info, err := os.Stat(body.TargetPath)
-	if err != nil {
-		http.Error(w, "目标路径不存在: "+err.Error(), http.StatusBadRequest)
-		return
+	result := &model.CollectionResult{}
+	if procs, err := collectors.Process.CollectProcesses(ctx); err == nil {
+		result.Processes = procs
 	}
-	if info.IsDir() {
-		hits, err = scanner.ScanDir(ctx, body.TargetPath)
-	} else {
-		hits, err = scanner.ScanFile(ctx, body.TargetPath)
+	if conns, err := collectors.Network.CollectConnections(ctx); err == nil {
+		result.Connections = conns
 	}
-	if err != nil {
-		http.Error(w, "YARA 扫描错误: "+err.Error(), http.StatusInternalServerError)
-		return
+	if items, err := collectors.Persistence.CollectPersistence(ctx); err == nil {
+		result.Persistence = items
+	}
+
+	targets := yara.CollectHighRiskTargets(result)
+
+	var hits []model.YaraHit
+	for _, target := range targets {
+		select {
+		case <-ctx.Done():
+			break
+		default:
+		}
+		h, scanErr := scanner.ScanFile(ctx, target.Path)
+		if scanErr != nil {
+			continue
+		}
+		for i := range h {
+			h[i].TargetType = target.TargetType
+			h[i].LinkedPID = target.LinkedPID
+		}
+		hits = append(hits, h...)
 	}
 
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	json.NewEncoder(w).Encode(map[string]interface{}{
-		"rule_count": scanner.RuleCount(),
-		"hits":       hits,
-		"hit_count":  len(hits),
+		"rule_count":   scanner.RuleCount(),
+		"target_count": len(targets),
+		"hits":         hits,
+		"hit_count":    len(hits),
 	})
 }
 
