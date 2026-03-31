@@ -13,25 +13,26 @@ import (
 	"github.com/dogadmin/LinIR/internal/model"
 )
 
-// collectSysctlConnections 通过 sysctl pcblist 采集全系统 TCP/UDP 连接。
+// collectSysctlConnections 通过 sysctl pcblist_n 采集全系统 TCP/UDP 连接。
 //
-// 这是 proc_pidfdinfo 的兜底方案。当 SIP 阻止按进程遍历 FD 时，
-// sysctl 接口仍然可以返回全局连接视图（等价于 netstat -an 的数据源）。
+// 使用 pcblist_n 格式（Apple netstat 使用的同一接口），优势：
+//   - 类型化子记录（xgn_kind 标识），不再需要字节模式扫描
+//   - 地址/端口在 xinpcb_n 中的固定偏移
+//   - TCP 状态在 xtcpcb_n 中的固定偏移
+//   - 包含 PID 信息（xsocket_n.so_last_pid）
+//   - 单次 sysctl 调用同时返回 IPv4 和 IPv6 连接
 //
-// 限制：不包含 PID 信息，所有连接的 PID=0。
-// 优势：不受 SIP 限制，可以看到所有连接。
+// 参考: XNU bsd/netinet/in_pcb.h, bsd/sys/socketvar.h, bsd/netinet/tcp_var.h
+//       Apple network_cmds/netstat.tproj/inet.c
 func collectSysctlConnections(ctx context.Context) ([]model.ConnectionInfo, error) {
 	var conns []model.ConnectionInfo
 
-	// 按协议遍历所有 pcblist sysctl（含 IPv4 和 IPv6）
 	pcbSources := []struct {
 		sysctl string
 		proto  string
 	}{
-		{"net.inet.tcp.pcblist", "tcp"},
-		{"net.inet.udp.pcblist", "udp"},
-		{"net.inet6.tcp6.pcblist", "tcp"},
-		{"net.inet6.udp6.pcblist", "udp"},
+		{"net.inet.tcp.pcblist_n", "tcp"},
+		{"net.inet.udp.pcblist_n", "udp"},
 	}
 
 	for _, src := range pcbSources {
@@ -42,180 +43,292 @@ func collectSysctlConnections(ctx context.Context) ([]model.ConnectionInfo, erro
 		}
 		raw, err := unix.SysctlRaw(src.sysctl)
 		if err == nil && len(raw) > 0 {
-			conns = append(conns, parsePcbList(raw, src.proto)...)
+			conns = append(conns, parsePcbListN(raw, src.proto)...)
 		}
 	}
 
 	if len(conns) == 0 {
-		return nil, fmt.Errorf("sysctl pcblist 未返回任何连接")
+		return nil, fmt.Errorf("sysctl pcblist_n 未返回任何连接")
 	}
 
 	return conns, nil
 }
 
-// parsePcbList 解析 sysctl net.inet.tcp/udp.pcblist 返回的二进制 blob。
+// pcblist_n 子记录类型常量 (XNU bsd/sys/socketvar.h)
+const (
+	xsoSocket = 0x001
+	xsoInpcb  = 0x010
+	xsoTcpcb  = 0x020
+)
+
+// parsePcbListN 解析 pcblist_n 格式的二进制数据。
 //
-// 格式：
-//   [xinpgen header] [record 1] [record 2] ... [xinpgen footer]
-//   每条记录开头 4 字节 = 记录长度 (little-endian uint32)
-//   footer 的长度等于 header 的长度（通常 24 字节）
-func parsePcbList(raw []byte, proto string) []model.ConnectionInfo {
-	if len(raw) < 8 {
+// 格式: [xinpgen header] [sub-record 1] [sub-record 2] ... [xinpgen footer]
+// 每条连接由多个子记录组成，通过 xgn_kind 位标志收集齐后输出。
+func parsePcbListN(raw []byte, proto string) []model.ConnectionInfo {
+	if len(raw) < 24 {
 		return nil
 	}
 
-	// 读取 header 长度
-	headerLen := int(binary.LittleEndian.Uint32(raw[0:4]))
-	if headerLen < 8 || headerLen > len(raw) {
+	// xinpgen header: 前 4 字节 = 长度
+	headerLen := binary.LittleEndian.Uint32(raw[0:4])
+	if headerLen < 8 || int(headerLen) > len(raw) {
 		return nil
 	}
 
 	var conns []model.ConnectionInfo
-	pos := headerLen
 
-	for pos+4 <= len(raw) {
-		recLen := int(binary.LittleEndian.Uint32(raw[pos : pos+4]))
-		if recLen < 24 {
-			break // footer 或损坏数据
+	// 收集状态：每条连接的子记录
+	var curSocket *pcbSocketInfo
+	var curInpcb *pcbInpcbInfo
+	var curTcpState int32 = -1
+	collected := uint32(0)
+
+	// 确定"齐全"标志
+	allKindInp := uint32(xsoSocket | xsoInpcb)
+	allKindTcp := uint32(xsoSocket | xsoInpcb | xsoTcpcb)
+	needAll := allKindInp
+	if proto == "tcp" {
+		needAll = allKindTcp
+	}
+
+	pos := roundup64(headerLen)
+
+	for int(pos)+8 <= len(raw) {
+		xgnLen := binary.LittleEndian.Uint32(raw[pos : pos+4])
+		xgnKind := binary.LittleEndian.Uint32(raw[pos+4 : pos+8])
+
+		if xgnLen <= headerLen {
+			break // footer
 		}
-		if pos+recLen > len(raw) {
+		if int(pos+xgnLen) > len(raw) {
 			break
 		}
 
-		record := raw[pos : pos+recLen]
-		conn := parseRecord(record, proto)
-		if conn != nil {
-			conns = append(conns, *conn)
+		rec := raw[pos : pos+xgnLen]
+
+		switch xgnKind {
+		case xsoSocket:
+			curSocket = parseSocketN(rec)
+			collected |= xsoSocket
+		case xsoInpcb:
+			curInpcb = parseInpcbN(rec)
+			collected |= xsoInpcb
+		case xsoTcpcb:
+			curTcpState = parseTcpcbN(rec)
+			collected |= xsoTcpcb
 		}
 
-		pos += recLen
+		// 当所有子记录收齐，输出一条连接
+		if collected&needAll == needAll {
+			if curInpcb != nil {
+				conn := buildConnection(curSocket, curInpcb, curTcpState, proto)
+				if conn != nil {
+					conns = append(conns, *conn)
+				}
+			}
+			// 重置
+			curSocket = nil
+			curInpcb = nil
+			curTcpState = -1
+			collected = 0
+		}
+
+		pos += roundup64(xgnLen)
 	}
 
 	return conns
 }
 
-// parseRecord 从单条 pcblist 记录中提取连接信息。
-// 使用 sockaddr 模式扫描而非硬编码偏移——更跨版本安全。
-func parseRecord(record []byte, proto string) *model.ConnectionInfo {
-	if len(record) < 80 {
+func roundup64(x uint32) uint32 {
+	return (x + 7) &^ 7
+}
+
+// ========== 子记录解析 ==========
+
+type pcbSocketInfo struct {
+	pid    int32
+	ePid   int32
+	family int32
+}
+
+type pcbInpcbInfo struct {
+	fport  uint16 // foreign port (网络字节序)
+	lport  uint16 // local port (网络字节序)
+	vflag  uint8  // INP_IPV4=0x1, INP_IPV6=0x2
+	faddr4 net.IP // IPv4 foreign addr
+	laddr4 net.IP // IPv4 local addr
+	faddr6 net.IP // IPv6 foreign addr
+	laddr6 net.IP // IPv6 local addr
+}
+
+// parseSocketN 从 xsocket_n 子记录中提取 PID 和协议族。
+//
+// struct xsocket_n {
+//   u32 xso_len;           // +0
+//   u32 xso_kind;          // +4
+//   u64 xso_so;            // +8
+//   i16 so_type;           // +16
+//   u32 so_options;        // +20 (aligned)
+//   i16 so_linger;         // +24
+//   i16 so_state;          // +26
+//   u64 so_pcb;            // +28 (aligned to 8? actually +32)
+//   i32 xso_protocol;      // +40
+//   i32 xso_family;        // +44
+//   ... more fields ...
+//   pid_t so_last_pid;     // varies by version
+//   pid_t so_e_pid;
+// };
+//
+// 由于 struct packing 和版本差异，我们用安全扫描法提取 PID。
+func parseSocketN(rec []byte) *pcbSocketInfo {
+	if len(rec) < 48 {
+		return nil
+	}
+	info := &pcbSocketInfo{}
+
+	// xso_family 在偏移 44 (确定字段)
+	info.family = int32(binary.LittleEndian.Uint32(rec[44:48]))
+
+	// so_last_pid 和 so_e_pid 是 xsocket_n 的最后两个字段 (macOS 10.15+)
+	// xsocket_n 典型大小 160-176 字节，至少 80 字节才可能包含 PID 字段
+	recLen := len(rec)
+	if recLen >= 80 {
+		info.ePid = int32(binary.LittleEndian.Uint32(rec[recLen-4:]))
+		info.pid = int32(binary.LittleEndian.Uint32(rec[recLen-8:]))
+		// 校验：PID 应该 >= 0 且合理
+		if info.pid < 0 || info.pid > 1000000 {
+			info.pid = 0
+		}
+		if info.ePid < 0 || info.ePid > 1000000 {
+			info.ePid = 0
+		}
+	}
+
+	return info
+}
+
+// parseInpcbN 从 xinpcb_n 子记录中提取地址和端口。
+//
+// struct xinpcb_n {
+//   u32 xi_len;              // +0
+//   u32 xi_kind;             // +4  (XSO_INPCB)
+//   u64 xi_inpp;             // +8
+//   u16 inp_fport;           // +16 (foreign port, network byte order)
+//   u16 inp_lport;           // +18 (local port, network byte order)
+//   u64 inp_ppcb;            // +24 (aligned)
+//   u64 inp_gencnt;          // +32
+//   i32 inp_flags;           // +40
+//   u32 inp_flow;            // +44
+//   u8  inp_vflag;           // +48
+//   u8  inp_ip_ttl;          // +49
+//   u8  inp_ip_p;            // +50
+//   u8  pad;                 // +51
+//   // inp_dependfaddr union // +52: in_addr_4in6(16B) or in6_addr(16B)
+//   // inp_dependladdr union // +68: in_addr_4in6(16B) or in6_addr(16B)
+//   // in_addr_4in6 = { u32 pad[3]; struct in_addr addr; } → IPv4 at +12
+// };
+func parseInpcbN(rec []byte) *pcbInpcbInfo {
+	if len(rec) < 84 { // 需要至少到 laddr 结束
 		return nil
 	}
 
-	// 在记录中搜索 sockaddr_in (AF_INET) 或 sockaddr_in6 (AF_INET6) 模式
-	addrs := findSockaddrs(record)
-	if len(addrs) < 2 {
-		return nil // 需要至少 local + remote 两个地址
+	info := &pcbInpcbInfo{}
+
+	// 端口: 网络字节序 (big-endian)
+	info.fport = binary.BigEndian.Uint16(rec[16:18])
+	info.lport = binary.BigEndian.Uint16(rec[18:20])
+
+	// vflag
+	info.vflag = rec[48]
+
+	// Foreign address union at +52
+	// in_addr_4in6: IPv4 地址在 union 内偏移 +12 (3个 u32 pad 之后)
+	info.faddr4 = net.IPv4(rec[52+12], rec[52+13], rec[52+14], rec[52+15])
+	info.faddr6 = make(net.IP, 16)
+	copy(info.faddr6, rec[52:68])
+
+	// Local address union at +68
+	info.laddr4 = net.IPv4(rec[68+12], rec[68+13], rec[68+14], rec[68+15])
+	info.laddr6 = make(net.IP, 16)
+	copy(info.laddr6, rec[68:84])
+
+	return info
+}
+
+// parseTcpcbN 从 xtcpcb_n 子记录中提取 TCP 状态。
+//
+// struct xtcpcb_n {
+//   u32 xt_len;     // +0
+//   u32 xt_kind;    // +4 (XSO_TCPCB)
+//   i32 t_state;    // +8
+//   ... more TCP fields ...
+// };
+func parseTcpcbN(rec []byte) int32 {
+	if len(rec) < 12 {
+		return -1
+	}
+	return int32(binary.LittleEndian.Uint32(rec[8:12]))
+}
+
+// ========== 构建连接 ==========
+
+func buildConnection(sock *pcbSocketInfo, inp *pcbInpcbInfo, tcpState int32, proto string) *model.ConnectionInfo {
+	var localIP, remoteIP net.IP
+	var family string
+
+	if inp.vflag&0x1 != 0 {
+		// IPv4
+		localIP = inp.laddr4
+		remoteIP = inp.faddr4
+		family = "ipv4"
+	} else if inp.vflag&0x2 != 0 {
+		// IPv6
+		localIP = inp.laddr6
+		remoteIP = inp.faddr6
+		family = "ipv6"
+	} else {
+		return nil
 	}
 
-	local := addrs[0]
-	remote := addrs[1]
-
-	// 跳过全零地址的监听 socket（0.0.0.0:0 → 0.0.0.0:0）
-	// 这些通常是未绑定的 socket
-	if local.port == 0 && remote.port == 0 {
+	// 跳过全零未绑定 socket
+	if inp.lport == 0 && inp.fport == 0 {
 		return nil
 	}
 
 	conn := &model.ConnectionInfo{
 		Proto:         proto,
-		Family:        local.family,
-		LocalAddress:  local.ip.String(),
-		LocalPort:     local.port,
-		RemoteAddress: remote.ip.String(),
-		RemotePort:    remote.port,
-		PID:           0, // sysctl 不提供 PID
-		Source:        "sysctl_pcblist",
-		Confidence:    "medium",
+		Family:        family,
+		LocalAddress:  localIP.String(),
+		LocalPort:     inp.lport,
+		RemoteAddress: remoteIP.String(),
+		RemotePort:    inp.fport,
+		Source:        "sysctl_pcblist_n",
+		Confidence:    "high",
 	}
 
-	// TCP state: 尝试在记录末尾区域找 TCP state
-	if proto == "tcp" {
-		conn.State = extractTCPState(record)
-	} else {
+	// PID
+	if sock != nil {
+		pid := int(sock.pid)
+		if pid <= 0 {
+			pid = int(sock.ePid)
+		}
+		if pid > 0 {
+			conn.PID = pid
+		}
+	}
+	if conn.PID == 0 {
+		conn.Confidence = "medium"
+	}
+
+	// TCP state
+	if proto == "tcp" && tcpState >= 0 {
+		conn.State = tcpStateName(tcpState)
+	} else if proto == "udp" {
 		conn.State = "STATELESS"
+	} else {
+		conn.State = "UNKNOWN"
 	}
 
 	return conn
-}
-
-// sockaddrInfo 保存解析出的地址信息
-type sockaddrInfo struct {
-	ip     net.IP
-	port   uint16
-	family string
-}
-
-// findSockaddrs 在二进制记录中搜索 sockaddr_in/sockaddr_in6 模式。
-//
-// sockaddr_in 签名:  byte[0]=16(sa_len), byte[1]=2(AF_INET)
-// sockaddr_in6 签名: byte[0]=28(sa_len), byte[1]=30(AF_INET6)
-//
-// 返回找到的所有地址（通常 2 个：local + remote）
-func findSockaddrs(buf []byte) []sockaddrInfo {
-	var result []sockaddrInfo
-
-	for i := 0; i+16 <= len(buf); i++ {
-		saLen := buf[i]
-		saFamily := buf[i+1]
-
-		if saLen == 16 && saFamily == 2 && i+16 <= len(buf) {
-			// sockaddr_in: [1]len [1]family [2]port(BE) [4]addr [8]zero
-			port := binary.BigEndian.Uint16(buf[i+2 : i+4])
-			ip := net.IPv4(buf[i+4], buf[i+5], buf[i+6], buf[i+7])
-
-			// 校验：后 8 字节应为零（sin_zero）
-			allZero := true
-			for _, b := range buf[i+8 : i+16] {
-				if b != 0 {
-					allZero = false
-					break
-				}
-			}
-			if !allZero {
-				continue // 不是真正的 sockaddr_in
-			}
-
-			result = append(result, sockaddrInfo{ip: ip, port: port, family: "ipv4"})
-
-			// 跳过这个 sockaddr 避免重复匹配
-			i += 15
-		} else if saLen == 28 && saFamily == 30 && i+28 <= len(buf) {
-			// sockaddr_in6: [1]len [1]family [2]port(BE) [4]flowinfo [16]addr [4]scope
-			port := binary.BigEndian.Uint16(buf[i+2 : i+4])
-			ip := make(net.IP, 16)
-			copy(ip, buf[i+8:i+24])
-
-			result = append(result, sockaddrInfo{ip: ip, port: port, family: "ipv6"})
-			i += 27
-		}
-	}
-
-	return result
-}
-
-// extractTCPState 尝试从 TCP 记录中提取 TCP 状态。
-// TCP state 通常在记录的后半部分。在 xtcpcb 结构中，
-// tcpsi_state 是一个 int32，值范围 0-10（与 tcp_fsm.h 一致）。
-// 我们从记录末尾往前搜索合理的状态值。
-func extractTCPState(record []byte) string {
-	// 策略：TCP state 值在 0-10 范围内，存储为 int32。
-	// 在记录的后 64 字节中搜索第一个值在 [0,10] 范围的 int32，
-	// 且前后字节不全为零（避免匹配到零填充区域）。
-	searchStart := len(record) - 64
-	if searchStart < len(record)/2 {
-		searchStart = len(record) / 2
-	}
-
-	for i := searchStart; i+4 <= len(record); i += 4 {
-		val := int32(binary.LittleEndian.Uint32(record[i : i+4]))
-		if val >= 0 && val <= 10 {
-			// 简单校验：非全零区域
-			if i > 0 && record[i-1] == 0 && val > 0 {
-				return tcpStateName(val)
-			}
-		}
-	}
-
-	// 回退：无法确定状态
-	return "UNKNOWN"
 }

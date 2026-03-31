@@ -85,7 +85,7 @@ func (c *NetworkCollector) CollectConnections(ctx context.Context) ([]model.Conn
 	// 如果 proc 采到 0 条但 sysctl 有数据，标记降级
 	if procCount == 0 && len(conns) > 0 {
 		supplementErr = fmt.Errorf(
-			"proc_pidfdinfo 未采集到连接 (SIP 限制)，已通过 sysctl pcblist 补充 %d 条 (无 PID 关联)",
+			"proc_pidfdinfo 未采集到连接 (SIP 限制)，已通过 sysctl pcblist_n 补充 %d 条",
 			len(conns))
 	}
 
