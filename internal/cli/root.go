@@ -42,6 +42,7 @@ and cross-source validation.`,
 		newYaraCmd(cfg),
 		newBundleCmd(cfg),
 		newGuiCmd(cfg),
+		newWatchCmd(cfg),
 	)
 
 	return root

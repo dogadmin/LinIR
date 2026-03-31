@@ -1,0 +1,95 @@
+package watch
+
+import (
+	"time"
+
+	"github.com/dogadmin/LinIR/internal/model"
+)
+
+// IOC 表示一条 IOC 指标
+type IOC struct {
+	Type  string   `json:"type"`  // "ip" | "domain"
+	Value string   `json:"value"` // IP 地址或域名
+	Tags  []string `json:"tags,omitempty"`
+}
+
+// IOCMatch 表示一次 IOC 与连接的匹配
+type IOCMatch struct {
+	IOC       IOC    `json:"ioc"`
+	MatchType string `json:"match_type"` // "direct_ip" | "direct_domain" | "resolved_ip"
+}
+
+// HitEvent 表示一次 IOC 命中事件（未补采）
+type HitEvent struct {
+	Timestamp  time.Time            `json:"timestamp"`
+	IOC        IOC                  `json:"ioc"`
+	MatchType  string               `json:"match_type"`
+	Connection model.ConnectionInfo `json:"connection"`
+}
+
+// TriggerDecision 表示去重/频控的决策结果
+type TriggerDecision struct {
+	ShouldEnrich bool   `json:"should_enrich"`
+	Deduped      bool   `json:"deduped"`
+	RateLimited  bool   `json:"rate_limited"`
+	Reason       string `json:"reason,omitempty"`
+}
+
+// EnrichedEvent 表示补采完成的完整命中事件
+type EnrichedEvent struct {
+	Timestamp   time.Time            `json:"timestamp"`
+	EventID     string               `json:"event_id"`
+	IOC         IOC                  `json:"ioc"`
+	MatchType   string               `json:"match_type"`
+	Connection  model.ConnectionInfo `json:"connection"`
+	Process     *model.ProcessInfo   `json:"process,omitempty"`
+	Binary      *BinaryContext       `json:"binary,omitempty"`
+	Persistence []model.PersistenceItem `json:"persistence_links,omitempty"`
+	YaraHits    []model.YaraHit      `json:"yara_hits,omitempty"`
+	Integrity   *IntegrityContext    `json:"integrity,omitempty"`
+	Score       int                  `json:"score"`
+	Severity    string               `json:"severity"`
+	Confidence  string               `json:"confidence"`
+	Evidence    []model.Evidence     `json:"evidence"`
+	Summary     string               `json:"summary"`
+}
+
+// BinaryContext 表示命中进程对应的二进制上下文
+type BinaryContext struct {
+	Path      string `json:"path"`
+	SHA256    string `json:"sha256,omitempty"`
+	Size      int64  `json:"size"`
+	Exists    bool   `json:"exists"`
+	InTmpDir  bool   `json:"in_tmp_dir"`
+	IsDeleted bool   `json:"is_deleted"`
+}
+
+// IntegrityContext 表示命中时的完整性上下文
+type IntegrityContext struct {
+	HostTrustLevel      string   `json:"host_trust_level"`
+	CollectionConfidence string  `json:"collection_confidence"`
+	VisibilityAnomalies []string `json:"visibility_anomalies,omitempty"`
+}
+
+// Snapshot 表示一次连接快照
+type Snapshot struct {
+	CollectedAt time.Time              `json:"collected_at"`
+	Connections []model.ConnectionInfo `json:"connections"`
+	Platform    string                 `json:"platform"`
+}
+
+// WatchConfig 表示 watch 模式的运行配置
+type WatchConfig struct {
+	IOCFile      string        // IOC 文件路径
+	WhitelistFile string       // 白名单文件路径（可选）
+	Duration     time.Duration // 监控总时长（0=无限）
+	Interval     time.Duration // 轮询间隔
+	OutputDir    string        // 输出目录
+	JSONOutput   bool          // 是否输出 JSON
+	TextOutput   bool          // 是否输出文本
+	BundleOutput bool          // 是否输出 bundle
+	DedupeWindow time.Duration // 去重时间窗口
+	MaxEvents    int           // 每分钟最大事件数（0=不限）
+	YaraRules    string        // YARA 规则路径（可选）
+	Verbose      bool
+}
