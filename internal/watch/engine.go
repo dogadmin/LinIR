@@ -14,14 +14,16 @@ import (
 
 // Engine 是 IOC 在线监控的主引擎
 type Engine struct {
-	cfg        WatchConfig
-	appCfg     *config.Config
-	iocStore   *IOCStore
-	collectors *collector.PlatformCollectors
-	trigger    *TriggerPolicy
-	enricher   *Enricher
-	writer     *EventWriter
-	yaraScanner *yara.Scanner
+	cfg          WatchConfig
+	appCfg       *config.Config
+	iocStore     *IOCStore
+	collectors   *collector.PlatformCollectors
+	trigger      *TriggerPolicy
+	enricher     *Enricher
+	writer       *EventWriter
+	yaraScanner  *yara.Scanner
+	scanCount    int
+	lastStatusAt time.Time
 }
 
 // NewEngine 创建监控引擎
@@ -73,14 +75,15 @@ func NewEngine(cfg WatchConfig, appCfg *config.Config) (*Engine, error) {
 	}
 
 	return &Engine{
-		cfg:         cfg,
-		appCfg:      appCfg,
-		iocStore:    store,
-		collectors:  collectors,
-		trigger:     trigger,
-		enricher:    enricher,
-		writer:      writer,
-		yaraScanner: yaraScanner,
+		cfg:          cfg,
+		appCfg:       appCfg,
+		iocStore:     store,
+		collectors:   collectors,
+		trigger:      trigger,
+		enricher:     enricher,
+		writer:       writer,
+		yaraScanner:  yaraScanner,
+		lastStatusAt: time.Now(),
 	}, nil
 }
 
@@ -119,12 +122,26 @@ func (e *Engine) Run(ctx context.Context) error {
 
 // scan 执行一次扫描周期
 func (e *Engine) scan(ctx context.Context) {
+	e.scanCount++
+
 	// 1. 获取连接快照
 	conns, err := e.collectors.Network.CollectConnections(ctx)
 	if err != nil && e.cfg.Verbose {
 		fmt.Printf("[WARN] 连接采集错误: %v\n", err)
 	}
-	if len(conns) == 0 {
+
+	connCount := len(conns)
+
+	// 周期性状态日志（每 30 秒或 verbose 模式每次）
+	if time.Since(e.lastStatusAt) >= 30*time.Second {
+		fmt.Printf("[INFO] 扫描周期 #%d: 采集到 %d 条连接\n", e.scanCount, connCount)
+		e.lastStatusAt = time.Now()
+	}
+
+	if connCount == 0 {
+		if e.cfg.Verbose {
+			fmt.Printf("[WARN] 周期 #%d: 未采集到任何连接\n", e.scanCount)
+		}
 		return
 	}
 

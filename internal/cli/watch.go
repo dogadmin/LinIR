@@ -12,7 +12,7 @@ import (
 
 func newWatchCmd(cfg *config.Config) *cobra.Command {
 	wcfg := watch.WatchConfig{
-		Interval:     3 * time.Second,
+		Interval:     1 * time.Second,
 		DedupeWindow: 60 * time.Second,
 		TextOutput:   true,
 	}
@@ -62,7 +62,7 @@ Whitelist file format: one entry per line with type prefix.
 	f := cmd.Flags()
 	f.StringVar(&wcfg.IOCFile, "iocs", "", "IOC list file path (required)")
 	f.IntVar(&durationSec, "duration", 0, "Monitoring duration in seconds (0=unlimited)")
-	f.IntVar(&intervalSec, "interval", 3, "Polling interval in seconds")
+	f.IntVar(&intervalSec, "interval", 1, "Polling interval in seconds")
 	f.BoolVar(&wcfg.JSONOutput, "json", false, "Output JSON events to file")
 	f.BoolVar(&wcfg.TextOutput, "text", true, "Output text events to stdout")
 	f.BoolVar(&wcfg.BundleOutput, "bundle", false, "Output per-event bundle directories")

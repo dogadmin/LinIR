@@ -23,24 +23,27 @@ import (
 func collectSysctlConnections(ctx context.Context) ([]model.ConnectionInfo, error) {
 	var conns []model.ConnectionInfo
 
-	// TCP
-	tcpRaw, err := unix.SysctlRaw("net.inet.tcp.pcblist")
-	if err == nil && len(tcpRaw) > 0 {
-		tcpConns := parsePcbList(tcpRaw, "tcp")
-		conns = append(conns, tcpConns...)
+	// 按协议遍历所有 pcblist sysctl（含 IPv4 和 IPv6）
+	pcbSources := []struct {
+		sysctl string
+		proto  string
+	}{
+		{"net.inet.tcp.pcblist", "tcp"},
+		{"net.inet.udp.pcblist", "udp"},
+		{"net.inet6.tcp6.pcblist", "tcp"},
+		{"net.inet6.udp6.pcblist", "udp"},
 	}
 
-	select {
-	case <-ctx.Done():
-		return conns, ctx.Err()
-	default:
-	}
-
-	// UDP
-	udpRaw, err := unix.SysctlRaw("net.inet.udp.pcblist")
-	if err == nil && len(udpRaw) > 0 {
-		udpConns := parsePcbList(udpRaw, "udp")
-		conns = append(conns, udpConns...)
+	for _, src := range pcbSources {
+		select {
+		case <-ctx.Done():
+			return conns, ctx.Err()
+		default:
+		}
+		raw, err := unix.SysctlRaw(src.sysctl)
+		if err == nil && len(raw) > 0 {
+			conns = append(conns, parsePcbList(raw, src.proto)...)
+		}
 	}
 
 	if len(conns) == 0 {

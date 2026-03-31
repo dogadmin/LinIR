@@ -14,7 +14,6 @@
     <span class="subtitle">应急响应取证仪表盘</span>
   </div>
   <div class="header-right">
-    <input type="text" id="yara-rules" class="header-input" placeholder="YARA 规则路径（文件或目录，可选）" title="输入 YARA 规则文件或目录的绝对路径，目录会自动递归加载 .yar/.yara/.rule 文件">
     <span id="status" class="badge badge-waiting">等待采集</span>
     <button id="btn-collect" class="btn btn-primary" onclick="startCollect()">开始采集</button>
     <button id="btn-export" class="btn btn-secondary" onclick="exportJSON()" disabled>导出 JSON</button>
@@ -74,6 +73,7 @@
       <button class="tab" onclick="switchTab('integrity')">完整性</button>
       <button class="tab" onclick="switchTab('preflight')">预检</button>
       <button class="tab" onclick="switchTab('errors')">错误</button>
+      <button class="tab" onclick="switchTab('yara')">YARA</button>
       <button class="tab" onclick="switchTab('watch')" id="tab-btn-watch">IOC 监控</button>
     </div>
 
@@ -129,6 +129,32 @@
       <div id="errors-content"><p class="muted">无错误</p></div>
     </div>
 
+    <!-- YARA 独立扫描 -->
+    <div id="tab-yara" class="tab-content">
+      <div class="toolbar" style="flex-wrap:wrap">
+        <div style="display:flex;flex-direction:column;gap:8px;flex:1;min-width:300px">
+          <div style="display:flex;gap:8px;align-items:center">
+            <label style="font-size:12px;color:var(--text2);min-width:70px">规则路径:</label>
+            <input type="text" id="yara-rules-path" placeholder="YARA 规则文件或目录的绝对路径" style="flex:1;padding:7px 12px;background:var(--bg);border:1px solid var(--border);border-radius:6px;color:var(--text);font-size:13px;outline:none">
+            <button class="btn btn-secondary" onclick="openFileBrowser('yara-rules-path')">浏览</button>
+          </div>
+          <div style="display:flex;gap:8px;align-items:center">
+            <label style="font-size:12px;color:var(--text2);min-width:70px">扫描目标:</label>
+            <input type="text" id="yara-target-path" placeholder="要扫描的文件或目录的绝对路径" style="flex:1;padding:7px 12px;background:var(--bg);border:1px solid var(--border);border-radius:6px;color:var(--text);font-size:13px;outline:none">
+            <button class="btn btn-secondary" onclick="openFileBrowser('yara-target-path')">浏览</button>
+          </div>
+        </div>
+        <button id="btn-yara-scan" class="btn btn-primary" onclick="runYaraScan()">扫描</button>
+      </div>
+      <div id="yara-status" style="margin-bottom:10px"></div>
+      <div class="table-wrap">
+        <table id="yara-table">
+          <thead><tr><th>规则名</th><th>目标文件</th><th>目标类型</th><th>匹配字符串</th><th>严重度</th></tr></thead>
+          <tbody></tbody>
+        </table>
+      </div>
+    </div>
+
     <!-- IOC 监控 -->
     <div id="tab-watch" class="tab-content">
       <div class="toolbar">
@@ -148,6 +174,22 @@
       </div>
     </div>
   </section>
+</div>
+
+<!-- 文件浏览器 Modal -->
+<div id="file-browser-modal" class="modal-overlay" style="display:none">
+  <div class="modal-content">
+    <div class="modal-header">
+      <h3>选择文件或目录</h3>
+      <button class="btn btn-secondary" onclick="closeFileBrowser()">关闭</button>
+    </div>
+    <div class="modal-path" id="fb-current-path">/</div>
+    <div class="modal-body" id="fb-entries"></div>
+    <div class="modal-footer">
+      <button class="btn btn-secondary" onclick="fbGoUp()">上级目录</button>
+      <button class="btn btn-primary" onclick="fbSelectCurrent()">选择当前目录</button>
+    </div>
+  </div>
 </div>
 
 <script src="/js/app.js"></script>

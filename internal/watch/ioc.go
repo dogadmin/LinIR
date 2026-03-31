@@ -83,6 +83,10 @@ func (s *IOCStore) MatchIP(ip string) (IOC, bool) {
 	if parsed == nil {
 		return IOC{}, false
 	}
+	// 显式归一化：IPv4-mapped IPv6 (::ffff:1.2.3.4) → 纯 IPv4 (1.2.3.4)
+	if v4 := parsed.To4(); v4 != nil {
+		parsed = v4
+	}
 	ioc, ok := s.ips[parsed.String()]
 	return ioc, ok
 }

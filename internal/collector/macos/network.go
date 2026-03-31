@@ -35,6 +35,7 @@ func (c *NetworkCollector) CollectConnections(ctx context.Context) ([]model.Conn
 	// 2. 主路线：遍历每个进程，枚举 socket FD
 	var conns []model.ConnectionInfo
 	seen := make(map[string]struct{})
+	seenTuples := make(map[string]struct{}) // 不含 PID 的 tuple key，用于合并去重
 
 	validCount := 0
 	failCount := 0
@@ -67,15 +68,38 @@ func (c *NetworkCollector) CollectConnections(ctx context.Context) ([]model.Conn
 			result.conns[i].ProcessName = procName
 			conns = append(conns, result.conns[i])
 			validCount++
+
+			// 记录不含 PID 的 tuple，用于后续合并去重
+			tupleKey := connTupleKey(&result.conns[i])
+			seenTuples[tupleKey] = struct{}{}
 		}
 	}
 
-	// 3. 兜底：如果主路线因 SIP 几乎完全失败，用 sysctl pcblist 获取全局视图
+	// 3. 两级降级策略：
+	//   完全失败 (len(conns)==0): sysctl 替换全部
+	//   部分失败 (大量 access denied + 连接数可疑少): 合并 sysctl 数据补全
 	var fallbackErr error
-	if len(conns) == 0 && len(kinfos) > 10 && accessDeniedCount > len(kinfos)/2 {
+	useSysctl := false
+	replaceAll := false
+
+	if len(kinfos) > 10 && accessDeniedCount > len(kinfos)/2 {
+		if len(conns) == 0 {
+			useSysctl = true
+			replaceAll = true
+		} else if len(conns) < len(kinfos)/4 {
+			useSysctl = true
+			replaceAll = false
+		}
+	}
+
+	if useSysctl {
 		fallbackConns, fbErr := collectSysctlConnections(ctx)
 		if fbErr == nil && len(fallbackConns) > 0 {
-			conns = fallbackConns
+			if replaceAll {
+				conns = fallbackConns
+			} else {
+				conns = mergeConnections(conns, fallbackConns, seenTuples)
+			}
 		}
 		fallbackErr = fmt.Errorf(
 			"proc_pidfdinfo 被 SIP 阻止 (%d/%d 进程访问被拒绝)，已降级到 sysctl pcblist (无 PID 关联)",
@@ -95,6 +119,25 @@ func (c *NetworkCollector) CollectConnections(ctx context.Context) ([]model.Conn
 
 // connDedup 生成连接的去重 key（含 PID，避免多进程共享 socket 时丢数据）
 func connDedup(c *model.ConnectionInfo) string {
-	return fmt.Sprintf("%d:%s:%s:%d:%s:%d",
-		c.PID, c.Proto, c.LocalAddress, c.LocalPort, c.RemoteAddress, c.RemotePort)
+	return fmt.Sprintf("%d:%s", c.PID, connTupleKey(c))
+}
+
+// connTupleKey 生成不含 PID 的连接 tuple key，用于 proc/sysctl 合并去重
+func connTupleKey(c *model.ConnectionInfo) string {
+	return fmt.Sprintf("%s:%s:%d:%s:%d",
+		c.Proto, c.LocalAddress, c.LocalPort, c.RemoteAddress, c.RemotePort)
+}
+
+// mergeConnections 将 sysctl 连接合并到 proc 连接中。
+// proc 连接有 PID 信息，优先保留；sysctl 连接只补充 proc 没有看到的。
+func mergeConnections(procConns, sysctlConns []model.ConnectionInfo, seenTuples map[string]struct{}) []model.ConnectionInfo {
+	merged := procConns
+	for i := range sysctlConns {
+		tupleKey := connTupleKey(&sysctlConns[i])
+		if _, exists := seenTuples[tupleKey]; !exists {
+			seenTuples[tupleKey] = struct{}{}
+			merged = append(merged, sysctlConns[i])
+		}
+	}
+	return merged
 }

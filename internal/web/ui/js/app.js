@@ -11,7 +11,7 @@ async function startCollect() {
   status.textContent = '采集中...';
 
   try {
-    const yaraRules = (document.getElementById('yara-rules').value || '').trim();
+    const yaraRules = (document.getElementById('yara-rules-path').value || '').trim();
     const body = yaraRules ? JSON.stringify({ yara_rules: yaraRules }) : '{}';
     const resp = await fetch('/api/collect', {
       method: 'POST',
@@ -117,15 +117,56 @@ function renderEvidence(score) {
   const tbody = document.querySelector('#evidence-table tbody');
   tbody.innerHTML = '';
   score.evidence.forEach(e => {
+    const hasDetails = e.details && Object.keys(e.details).length > 0;
     const tr = document.createElement('tr');
+    tr.className = hasDetails ? 'evidence-expandable' : '';
     tr.innerHTML = `
       <td><span class="sev-${e.severity}">${e.severity.toUpperCase()}</span></td>
       <td>${esc(e.domain)}</td>
       <td><code>${esc(e.rule)}</code></td>
-      <td>${esc(e.description)}</td>
+      <td>${esc(e.description)} ${hasDetails ? '<span class="evidence-chevron">&#9654;</span>' : ''}</td>
       <td><strong>+${e.score}</strong></td>`;
     tbody.appendChild(tr);
+
+    if (hasDetails) {
+      const detailTr = document.createElement('tr');
+      detailTr.className = 'evidence-detail-row';
+      detailTr.style.display = 'none';
+      detailTr.innerHTML = `<td colspan="5"><div class="evidence-detail-panel">${renderDetails(e.details)}</div></td>`;
+      tbody.appendChild(detailTr);
+
+      tr.addEventListener('click', () => {
+        const isOpen = detailTr.style.display !== 'none';
+        detailTr.style.display = isOpen ? 'none' : 'table-row';
+        tr.querySelector('.evidence-chevron').innerHTML = isOpen ? '&#9654;' : '&#9660;';
+        tr.classList.toggle('evidence-expanded', !isOpen);
+      });
+    }
   });
+}
+
+function renderDetails(details) {
+  let html = '<div class="detail-grid">';
+  for (const [key, value] of Object.entries(details)) {
+    if (value === null || value === undefined || value === '') continue;
+    if (Array.isArray(value) && value.length === 0) continue;
+    const displayKey = key.replace(/_/g, ' ');
+    let displayValue;
+    if (Array.isArray(value)) {
+      if (typeof value[0] === 'object') {
+        displayValue = '<pre>' + esc(JSON.stringify(value, null, 2)) + '</pre>';
+      } else {
+        displayValue = value.map(v => '<code>' + esc(String(v)) + '</code>').join(' ');
+      }
+    } else if (typeof value === 'object') {
+      displayValue = '<pre>' + esc(JSON.stringify(value, null, 2)) + '</pre>';
+    } else {
+      displayValue = '<code>' + esc(String(value)) + '</code>';
+    }
+    html += `<div class="detail-key">${esc(displayKey)}</div><div class="detail-value">${displayValue}</div>`;
+  }
+  html += '</div>';
+  return html;
 }
 
 function renderProcesses(procs) {
@@ -318,7 +359,7 @@ async function startWatch() {
   if (!iocsText) { alert('请输入至少一条 IOC'); return; }
 
   const interval = parseInt(document.getElementById('watch-interval').value) || 3;
-  const yaraRules = (document.getElementById('yara-rules').value || '').trim();
+  const yaraRules = (document.getElementById('yara-rules-path').value || '').trim();
 
   document.getElementById('btn-watch-start').disabled = true;
   document.getElementById('btn-watch-stop').disabled = false;
@@ -402,4 +443,133 @@ function appendWatchEvent(evt) {
     <td>${esc(evt.confidence)}</td>
     <td>${evidenceHtml}</td>`;
   tbody.prepend(tr); // 新事件在最上面
+}
+
+// ========== YARA 独立扫描 ==========
+
+async function runYaraScan() {
+  const rulesPath = document.getElementById('yara-rules-path').value.trim();
+  const targetPath = document.getElementById('yara-target-path').value.trim();
+  const status = document.getElementById('yara-status');
+
+  if (!rulesPath) { alert('请输入 YARA 规则路径'); return; }
+  if (!targetPath) { alert('请输入扫描目标路径'); return; }
+
+  document.getElementById('btn-yara-scan').disabled = true;
+  status.innerHTML = '<span class="badge badge-running">扫描中...</span>';
+
+  try {
+    const resp = await fetch('/api/yara/scan', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ rules_path: rulesPath, target_path: targetPath }),
+    });
+    if (!resp.ok) throw new Error(await resp.text());
+    const result = await resp.json();
+
+    status.innerHTML = `<span class="badge badge-done">扫描完成</span> 加载 ${result.rule_count} 条规则，命中 ${result.hit_count} 条`;
+    renderYaraHits(result.hits || []);
+  } catch (e) {
+    status.innerHTML = `<span class="badge badge-error">扫描失败: ${esc(e.message)}</span>`;
+  } finally {
+    document.getElementById('btn-yara-scan').disabled = false;
+  }
+}
+
+function renderYaraHits(hits) {
+  const tbody = document.querySelector('#yara-table tbody');
+  tbody.innerHTML = '';
+  if (hits.length === 0) {
+    tbody.innerHTML = '<tr><td colspan="5" class="muted" style="text-align:center;padding:20px">无匹配结果</td></tr>';
+    return;
+  }
+  hits.forEach(h => {
+    const tr = document.createElement('tr');
+    const sev = h.severity_hint || 'info';
+    tr.innerHTML = `
+      <td><strong>${esc(h.rule)}</strong></td>
+      <td title="${esc(h.target_path)}">${esc(h.target_path)}</td>
+      <td>${esc(h.target_type || 'file')}</td>
+      <td>${(h.strings || []).map(s => '<code>' + esc(s) + '</code>').join(' ')}</td>
+      <td><span class="sev-${sev}">${sev.toUpperCase()}</span></td>`;
+    tbody.appendChild(tr);
+  });
+}
+
+// ========== 文件浏览器 ==========
+
+let fbTargetInput = '';
+let fbCurrentPath = '/';
+
+function openFileBrowser(inputId) {
+  fbTargetInput = inputId;
+  const currentVal = document.getElementById(inputId).value.trim();
+  fbCurrentPath = currentVal || '/';
+  document.getElementById('file-browser-modal').style.display = 'flex';
+  fbNavigate(fbCurrentPath);
+}
+
+function closeFileBrowser() {
+  document.getElementById('file-browser-modal').style.display = 'none';
+}
+
+async function fbNavigate(path) {
+  fbCurrentPath = path;
+  document.getElementById('fb-current-path').textContent = path;
+  const el = document.getElementById('fb-entries');
+  el.innerHTML = '<p class="muted">加载中...</p>';
+
+  try {
+    const resp = await fetch('/api/fs/browse?path=' + encodeURIComponent(path));
+    if (!resp.ok) throw new Error(await resp.text());
+    const data = await resp.json();
+    fbCurrentPath = data.path;
+    document.getElementById('fb-current-path').textContent = data.path;
+
+    let html = '';
+    const dirs = (data.entries || []).filter(e => e.is_dir);
+    const files = (data.entries || []).filter(e => !e.is_dir);
+
+    dirs.forEach(e => {
+      const fullPath = data.path === '/' ? '/' + e.name : data.path + '/' + e.name;
+      html += `<div class="fb-entry fb-dir" data-path="${esc(fullPath)}" data-action="navigate">
+        <span class="fb-icon">📁</span> ${esc(e.name)}
+      </div>`;
+    });
+    files.forEach(e => {
+      const fullPath = data.path === '/' ? '/' + e.name : data.path + '/' + e.name;
+      const size = e.size > 1048576 ? (e.size/1048576).toFixed(1)+'MB' : e.size > 1024 ? (e.size/1024).toFixed(1)+'KB' : e.size+'B';
+      html += `<div class="fb-entry fb-file" data-path="${esc(fullPath)}" data-action="select">
+        <span class="fb-icon">📄</span> ${esc(e.name)} <span class="fb-size">${size}</span>
+      </div>`;
+    });
+
+    el.innerHTML = html || '<p class="muted">空目录</p>';
+
+    // 事件委托：避免 inline handler 的 XSS 风险
+    el.querySelectorAll('[data-action="navigate"]').forEach(div => {
+      div.addEventListener('dblclick', () => fbNavigate(div.getAttribute('data-path')));
+    });
+    el.querySelectorAll('[data-action="select"]').forEach(div => {
+      div.addEventListener('click', () => fbSelectFile(div.getAttribute('data-path')));
+    });
+  } catch (e) {
+    el.innerHTML = `<p class="muted">错误: ${esc(e.message)}</p>`;
+  }
+}
+
+function fbGoUp() {
+  const parts = fbCurrentPath.split('/').filter(p => p);
+  parts.pop();
+  fbNavigate('/' + parts.join('/'));
+}
+
+function fbSelectCurrent() {
+  document.getElementById(fbTargetInput).value = fbCurrentPath;
+  closeFileBrowser();
+}
+
+function fbSelectFile(path) {
+  document.getElementById(fbTargetInput).value = path;
+  closeFileBrowser();
 }

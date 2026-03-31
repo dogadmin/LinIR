@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"runtime"
 	"strings"
 	"sync"
@@ -23,6 +24,7 @@ import (
 	"github.com/dogadmin/LinIR/internal/preflight"
 	"github.com/dogadmin/LinIR/internal/selfcheck"
 	"github.com/dogadmin/LinIR/internal/watch"
+	"github.com/dogadmin/LinIR/internal/yara"
 )
 
 //go:embed ui/*
@@ -65,6 +67,10 @@ func (s *Server) Start() error {
 	mux.HandleFunc("/api/watch/stop", s.handleWatchStop)
 	mux.HandleFunc("/api/watch/events", s.handleWatchEvents)
 	mux.HandleFunc("/api/watch/stream", s.handleWatchStream)
+
+	// YARA + 文件浏览 API
+	mux.HandleFunc("/api/fs/browse", s.handleFsBrowse)
+	mux.HandleFunc("/api/yara/scan", s.handleYaraScan)
 
 	addr := fmt.Sprintf("127.0.0.1:%d", s.port)
 	listener, err := net.Listen("tcp", addr)
@@ -117,7 +123,7 @@ func (s *Server) handleCollect(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if yaraRules != "" {
-		if !strings.HasPrefix(yaraRules, "/") {
+		if !filepath.IsAbs(yaraRules) {
 			http.Error(w, "YARA 规则路径必须是绝对路径", http.StatusBadRequest)
 			return
 		}
@@ -230,7 +236,7 @@ func (s *Server) handleWatchStart(w http.ResponseWriter, r *http.Request) {
 	tmpFile.Close()
 	tmpName := tmpFile.Name()
 
-	interval := 3
+	interval := 1
 	if body.Interval > 0 {
 		interval = body.Interval
 	}
@@ -422,6 +428,138 @@ func (s *Server) handleWatchStream(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	}
+}
+
+// ========== YARA + 文件浏览 API ==========
+
+// handleFsBrowse 返回目录列表，供前端文件浏览器使用
+func (s *Server) handleFsBrowse(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "需要 GET", http.StatusMethodNotAllowed)
+		return
+	}
+	dir := r.URL.Query().Get("path")
+	if dir == "" {
+		dir = "/"
+	}
+	if !filepath.IsAbs(dir) {
+		http.Error(w, "必须是绝对路径", http.StatusBadRequest)
+		return
+	}
+	dir = filepath.Clean(dir)
+
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		http.Error(w, "无法读取目录", http.StatusBadRequest)
+		return
+	}
+
+	type fsEntry struct {
+		Name  string `json:"name"`
+		IsDir bool   `json:"is_dir"`
+		Size  int64  `json:"size"`
+	}
+
+	const maxEntries = 1000
+
+	result := struct {
+		Path      string    `json:"path"`
+		Parent    string    `json:"parent"`
+		Entries   []fsEntry `json:"entries"`
+		Truncated bool      `json:"truncated,omitempty"`
+	}{
+		Path:    dir,
+		Parent:  filepath.Dir(dir),
+		Entries: []fsEntry{},
+	}
+
+	for _, entry := range entries {
+		if strings.HasPrefix(entry.Name(), ".") {
+			continue
+		}
+		fe := fsEntry{Name: entry.Name(), IsDir: entry.IsDir()}
+		if !entry.IsDir() {
+			if info, err := entry.Info(); err == nil {
+				fe.Size = info.Size()
+			}
+		}
+		result.Entries = append(result.Entries, fe)
+		if len(result.Entries) >= maxEntries {
+			result.Truncated = true
+			break
+		}
+	}
+
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	json.NewEncoder(w).Encode(result)
+}
+
+// handleYaraScan 独立于 collect 流程运行 YARA 扫描
+func (s *Server) handleYaraScan(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "需要 POST", http.StatusMethodNotAllowed)
+		return
+	}
+
+	var body struct {
+		RulesPath  string `json:"rules_path"`
+		TargetPath string `json:"target_path"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		http.Error(w, "请求格式错误", http.StatusBadRequest)
+		return
+	}
+
+	if body.RulesPath == "" || body.TargetPath == "" {
+		http.Error(w, "规则路径和目标路径不能为空", http.StatusBadRequest)
+		return
+	}
+	if !filepath.IsAbs(body.RulesPath) {
+		http.Error(w, "规则路径必须是绝对路径", http.StatusBadRequest)
+		return
+	}
+	if !filepath.IsAbs(body.TargetPath) {
+		http.Error(w, "目标路径必须是绝对路径", http.StatusBadRequest)
+		return
+	}
+
+	if !yara.Available() {
+		http.Error(w, "YARA 支持未编译", http.StatusBadRequest)
+		return
+	}
+
+	scanner, err := yara.NewScanner(body.RulesPath)
+	if err != nil {
+		http.Error(w, "加载 YARA 规则失败: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(r.Context(), 120*time.Second)
+	defer cancel()
+
+	var hits []model.YaraHit
+
+	info, err := os.Stat(body.TargetPath)
+	if err != nil {
+		http.Error(w, "目标路径不存在: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+	if info.IsDir() {
+		hits, err = scanner.ScanDir(ctx, body.TargetPath)
+	} else {
+		hits, err = scanner.ScanFile(ctx, body.TargetPath)
+	}
+	if err != nil {
+		http.Error(w, "YARA 扫描错误: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"rule_count": scanner.RuleCount(),
+		"hits":       hits,
+		"hit_count":  len(hits),
+	})
 }
 
 func openBrowser(url string) {

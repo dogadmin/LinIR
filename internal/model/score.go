@@ -11,9 +11,10 @@ type ScoreResult struct {
 
 // Evidence is a single scored observation contributing to the overall score.
 type Evidence struct {
-	Domain      string `json:"domain"` // "process"|"network"|"persistence"|"integrity"|"yara"
-	Rule        string `json:"rule"`
-	Description string `json:"description"`
-	Score       int    `json:"score"`
-	Severity    string `json:"severity"`
+	Domain      string                 `json:"domain"` // "process"|"network"|"persistence"|"integrity"|"yara"
+	Rule        string                 `json:"rule"`
+	Description string                 `json:"description"`
+	Score       int                    `json:"score"`
+	Severity    string                 `json:"severity"`
+	Details     map[string]interface{} `json:"details,omitempty"`
 }
