@@ -187,76 +187,78 @@ func (s *Server) handleWatchStart(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// 立即抢占 watching 标志，防止并发双启动
 	s.mu.Lock()
 	if s.watching {
 		s.mu.Unlock()
 		http.Error(w, "监控已在运行中", http.StatusConflict)
 		return
 	}
+	s.watching = true // 先锁定，失败时回滚
 	s.mu.Unlock()
 
+	// 初始化失败时回滚 watching 状态
+	rollback := func() {
+		s.mu.Lock()
+		s.watching = false
+		s.mu.Unlock()
+	}
+
 	var body struct {
-		IOCs      string `json:"iocs"`       // IOC 列表，每行一个
-		Interval  int    `json:"interval"`    // 秒
+		IOCs      string `json:"iocs"`
+		Interval  int    `json:"interval"`
 		YaraRules string `json:"yara_rules"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		rollback()
 		http.Error(w, "请求格式错误", http.StatusBadRequest)
 		return
 	}
 	if strings.TrimSpace(body.IOCs) == "" {
+		rollback()
 		http.Error(w, "IOC 列表不能为空", http.StatusBadRequest)
 		return
 	}
 
-	// 将 IOC 文本写入临时文件
 	tmpFile, err := os.CreateTemp("", "linir-iocs-*.txt")
 	if err != nil {
+		rollback()
 		http.Error(w, "创建临时文件失败", http.StatusInternalServerError)
 		return
 	}
 	tmpFile.WriteString(body.IOCs)
 	tmpFile.Close()
+	tmpName := tmpFile.Name()
 
 	interval := 3
 	if body.Interval > 0 {
 		interval = body.Interval
 	}
 
-	// 初始化 watch engine
-	wcfg := watch.WatchConfig{
-		IOCFile:      tmpFile.Name(),
-		Interval:     time.Duration(interval) * time.Second,
-		DedupeWindow: 60 * time.Second,
-		TextOutput:   false,
-		JSONOutput:   false,
-		YaraRules:    body.YaraRules,
-	}
-
-	// 构建 enricher 的依赖
 	collectors, err := collector.NewPlatformCollectors()
 	if err != nil {
-		os.Remove(tmpFile.Name())
+		os.Remove(tmpName)
+		rollback()
 		http.Error(w, "初始化采集器失败: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
 
-	iocStore, err := watch.LoadIOCFile(tmpFile.Name())
+	iocStore, err := watch.LoadIOCFile(tmpName)
 	if err != nil {
-		os.Remove(tmpFile.Name())
+		os.Remove(tmpName)
+		rollback()
 		http.Error(w, "IOC 解析失败: "+err.Error(), http.StatusBadRequest)
 		return
 	}
 
 	sc, _ := selfcheck.Run(context.Background())
 	pf, _ := preflight.Run(context.Background(), s.cfg)
-	trigger := watch.NewTriggerPolicy(wcfg.DedupeWindow, 0, nil)
-	enricher := watch.NewEnricher(collectors, wcfg.YaraRules, pf, sc)
+	trigger := watch.NewTriggerPolicy(60*time.Second, 0, nil)
+	enricher := watch.NewEnricher(collectors, body.YaraRules, pf, sc)
 
 	ctx, cancel := context.WithCancel(context.Background())
 
 	s.mu.Lock()
-	s.watching = true
 	s.watchCancel = cancel
 	s.watchEvents = nil
 	s.mu.Unlock()
@@ -267,10 +269,10 @@ func (s *Server) handleWatchStart(w http.ResponseWriter, r *http.Request) {
 			s.mu.Lock()
 			s.watching = false
 			s.mu.Unlock()
-			os.Remove(tmpFile.Name())
+			os.Remove(tmpName)
 		}()
 
-		ticker := time.NewTicker(wcfg.Interval)
+		ticker := time.NewTicker(time.Duration(interval) * time.Second)
 		defer ticker.Stop()
 
 		scanOnce := func() {
@@ -279,6 +281,11 @@ func (s *Server) handleWatchStart(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 			hits := watch.MatchConnections(conns, iocStore)
+			if len(hits) == 0 {
+				return
+			}
+			// 预采集一次上下文，所有命中共享（避免 O(hits*procs) 性能问题）
+			cache := enricher.CollectCache(ctx)
 			for _, hit := range hits {
 				select {
 				case <-ctx.Done():
@@ -289,7 +296,7 @@ func (s *Server) handleWatchStart(w http.ResponseWriter, r *http.Request) {
 				if !decision.ShouldEnrich {
 					continue
 				}
-				evt := enricher.Enrich(ctx, hit)
+				evt := enricher.Enrich(ctx, hit, cache)
 
 				s.mu.Lock()
 				s.watchEvents = append(s.watchEvents, evt)
@@ -377,33 +384,39 @@ func (s *Server) handleWatchStream(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Connection", "keep-alive")
 
 	lastIdx := 0
+	ticker := time.NewTicker(1 * time.Second) // 修复: 不用 time.After 避免 timer 泄漏
+	defer ticker.Stop()
+
 	for {
 		select {
 		case <-r.Context().Done():
 			return
-		case <-time.After(1 * time.Second):
+		case <-ticker.C:
+			// 修复: 在锁内拷贝新事件切片，避免 slice alias 数据竞争
 			s.mu.Lock()
-			events := s.watchEvents
+			newCount := len(s.watchEvents)
+			var newEvents []watch.EnrichedEvent
+			if newCount > lastIdx {
+				newEvents = make([]watch.EnrichedEvent, newCount-lastIdx)
+				copy(newEvents, s.watchEvents[lastIdx:newCount])
+			}
 			watching := s.watching
 			s.mu.Unlock()
 
-			// 发送新事件
-			for lastIdx < len(events) {
-				data, _ := json.Marshal(events[lastIdx])
+			// 发送新事件（使用拷贝的数据，锁外操作）
+			for _, evt := range newEvents {
+				data, _ := json.Marshal(evt)
 				fmt.Fprintf(w, "data: %s\n\n", data)
 				flusher.Flush()
-				lastIdx++
 			}
+			lastIdx = newCount
 
-			// 发送心跳（保持连接）
-			if lastIdx == len(events) {
-				fmt.Fprintf(w, ": heartbeat watching=%v events=%d\n\n", watching, len(events))
-				flusher.Flush()
-			}
+			// 心跳
+			fmt.Fprintf(w, ": heartbeat watching=%v events=%d\n\n", watching, newCount)
+			flusher.Flush()
 
-			if !watching && lastIdx >= len(events) {
-				// 监控结束且所有事件已发送
-				fmt.Fprintf(w, "event: done\ndata: {\"total\": %d}\n\n", len(events))
+			if !watching && lastIdx >= newCount {
+				fmt.Fprintf(w, "event: done\ndata: {\"total\": %d}\n\n", newCount)
 				flusher.Flush()
 				return
 			}

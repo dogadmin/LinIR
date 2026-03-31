@@ -7,7 +7,6 @@ import (
 
 	"github.com/dogadmin/LinIR/internal/collector"
 	"github.com/dogadmin/LinIR/internal/config"
-	"github.com/dogadmin/LinIR/internal/model"
 	"github.com/dogadmin/LinIR/internal/preflight"
 	"github.com/dogadmin/LinIR/internal/selfcheck"
 	"github.com/dogadmin/LinIR/internal/yara"
@@ -122,10 +121,8 @@ func (e *Engine) Run(ctx context.Context) error {
 func (e *Engine) scan(ctx context.Context) {
 	// 1. 获取连接快照
 	conns, err := e.collectors.Network.CollectConnections(ctx)
-	if err != nil {
-		if e.cfg.Verbose {
-			fmt.Printf("[WARN] 连接采集错误: %v\n", err)
-		}
+	if err != nil && e.cfg.Verbose {
+		fmt.Printf("[WARN] 连接采集错误: %v\n", err)
 	}
 	if len(conns) == 0 {
 		return
@@ -137,7 +134,10 @@ func (e *Engine) scan(ctx context.Context) {
 		return
 	}
 
-	// 3. 对每个命中事件：去重 → 补采 → 输出
+	// 3. 预采集上下文（每周期一次，所有命中共享）
+	cache := e.enricher.CollectCache(ctx)
+
+	// 4. 对每个命中事件：去重 → 补采 → YARA → 输出
 	for _, hit := range hits {
 		select {
 		case <-ctx.Done():
@@ -147,51 +147,22 @@ func (e *Engine) scan(ctx context.Context) {
 
 		decision := e.trigger.Evaluate(hit)
 		if !decision.ShouldEnrich {
-			if e.cfg.Verbose && decision.Deduped {
-				// 去重的不打印
-			} else if decision.RateLimited && e.cfg.Verbose {
-				fmt.Printf("[RATE] %s\n", decision.Reason)
-			}
 			continue
 		}
 
-		// 补采
-		evt := e.enricher.Enrich(ctx, hit)
+		// 补采（使用 cache，不重复采集）
+		evt := e.enricher.Enrich(ctx, hit, cache)
 
-		// YARA 补扫（engine 层处理，避免 enricher 循环导入）
+		// YARA 补扫
 		if e.yaraScanner != nil && evt.Process != nil && evt.Process.Exe != "" {
-			yaraHits, err := e.yaraScanner.ScanFile(ctx, evt.Process.Exe)
-			if err == nil {
+			yaraHits, scanErr := e.yaraScanner.ScanFile(ctx, evt.Process.Exe)
+			if scanErr == nil && len(yaraHits) > 0 {
 				evt.YaraHits = yaraHits
+				// 重新评分（YARA 结果改变分数）
+				scoreEvent(&evt)
 			}
 		}
 
-		// 重新评分（YARA 结果可能改变分数）
-		if len(evt.YaraHits) > 0 {
-			for _, yh := range evt.YaraHits {
-				evt.Score += 30
-				evt.Evidence = append(evt.Evidence, model.Evidence{
-					Domain: "yara", Rule: "yara_hit",
-					Description: "YARA 规则命中: " + yh.Rule,
-					Score: 30, Severity: "high",
-				})
-			}
-			if evt.Score > 100 {
-				evt.Score = 100
-			}
-			// 重算 severity
-			switch {
-			case evt.Score >= 80:
-				evt.Severity = "critical"
-			case evt.Score >= 60:
-				evt.Severity = "high"
-			case evt.Score >= 40:
-				evt.Severity = "medium"
-			}
-			evt.Summary = buildEventSummary(&evt)
-		}
-
-		// 输出
 		e.writer.WriteEvent(evt)
 	}
 }
