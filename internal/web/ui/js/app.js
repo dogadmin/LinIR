@@ -299,12 +299,107 @@ function tagHTML(text, color) {
 
 function tagColor(flag) {
   const red = ['exe_deleted','exe_in_tmp','dev_tcp_reverse_shell','system_wide_preload','rootkit_suspected','fake_kernel_thread','pipe_to_shell','ld_preload_in_env','target_in_tmp'];
-  const orange = ['interpreter','interpreter_with_network','interpreter_established_outbound','persistent_and_networked','webserver_spawned_shell','orphan_active_connection','raw_socket','downloads_from_network','base64_usage','impersonates_apple'];
-  const yellow = ['name_exe_mismatch','exe_unreadable','target_missing','loose_permissions','world_writable','forced_command','shell_exec'];
+  const orange = ['persistent_and_networked','webserver_spawned_shell','orphan_active_connection','impersonates_apple'];
+  const yellow = ['target_missing','loose_permissions','world_writable','forced_command'];
 
   if (red.includes(flag)) return 'red';
   if (orange.includes(flag)) return 'orange';
   if (yellow.includes(flag)) return 'yellow';
   if (flag.startsWith('suspicious_remote_port')) return 'red';
   return 'blue';
+}
+
+// ========== IOC Watch ==========
+
+let watchEventSource = null;
+
+async function startWatch() {
+  const iocsText = document.getElementById('watch-iocs').value.trim();
+  if (!iocsText) { alert('请输入至少一条 IOC'); return; }
+
+  const interval = parseInt(document.getElementById('watch-interval').value) || 3;
+  const yaraRules = (document.getElementById('yara-rules').value || '').trim();
+
+  document.getElementById('btn-watch-start').disabled = true;
+  document.getElementById('btn-watch-stop').disabled = false;
+  document.getElementById('watch-status').innerHTML = '<span class="badge badge-running">监控中...</span>';
+  document.querySelector('#watch-table tbody').innerHTML = '';
+
+  try {
+    const resp = await fetch('/api/watch/start', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ iocs: iocsText, interval: interval, yara_rules: yaraRules }),
+    });
+    if (!resp.ok) throw new Error(await resp.text());
+    const result = await resp.json();
+    document.getElementById('watch-status').innerHTML =
+      `<span class="badge badge-running">监控中</span> 已加载 ${result.ioc_count} 条 IOC，间隔 ${result.interval} 秒`;
+
+    // 开启 SSE 事件流
+    startWatchStream();
+  } catch (e) {
+    document.getElementById('watch-status').innerHTML = `<span class="badge badge-error">启动失败: ${esc(e.message)}</span>`;
+    document.getElementById('btn-watch-start').disabled = false;
+    document.getElementById('btn-watch-stop').disabled = true;
+  }
+}
+
+async function stopWatch() {
+  try {
+    await fetch('/api/watch/stop', { method: 'POST' });
+  } catch (_) {}
+  if (watchEventSource) { watchEventSource.close(); watchEventSource = null; }
+  document.getElementById('btn-watch-start').disabled = false;
+  document.getElementById('btn-watch-stop').disabled = true;
+  document.getElementById('watch-status').innerHTML = '<span class="badge badge-done">监控已停止</span>';
+}
+
+function startWatchStream() {
+  if (watchEventSource) watchEventSource.close();
+  watchEventSource = new EventSource('/api/watch/stream');
+
+  watchEventSource.onmessage = function(e) {
+    try {
+      const evt = JSON.parse(e.data);
+      appendWatchEvent(evt);
+    } catch (_) {}
+  };
+
+  watchEventSource.addEventListener('done', function(e) {
+    watchEventSource.close();
+    watchEventSource = null;
+    document.getElementById('btn-watch-start').disabled = false;
+    document.getElementById('btn-watch-stop').disabled = true;
+    document.getElementById('watch-status').innerHTML = '<span class="badge badge-done">监控结束</span>';
+  });
+
+  watchEventSource.onerror = function() {
+    // SSE 断开——可能是服务器关闭或网络问题
+  };
+}
+
+function appendWatchEvent(evt) {
+  const tbody = document.querySelector('#watch-table tbody');
+  const tr = document.createElement('tr');
+  if (evt.severity === 'critical' || evt.severity === 'high') tr.className = 'suspicious';
+
+  const proc = evt.process ? evt.process.name : '—';
+  const remote = evt.connection ? `${evt.connection.remote_address}:${evt.connection.remote_port}` : '—';
+  const time = evt.timestamp ? new Date(evt.timestamp).toLocaleTimeString() : '—';
+  const evidenceHtml = (evt.evidence || []).map(e =>
+    `<span class="tag tag-${e.severity === 'high' ? 'red' : e.severity === 'medium' ? 'orange' : 'blue'}">+${e.score} ${esc(e.description)}</span>`
+  ).join(' ');
+
+  tr.innerHTML = `
+    <td>${esc(time)}</td>
+    <td><span class="sev-${evt.severity}">${(evt.severity||'').toUpperCase()}</span></td>
+    <td><strong>${esc(evt.ioc?.value)}</strong></td>
+    <td>${evt.connection?.pid || 0}</td>
+    <td>${esc(proc)}</td>
+    <td>${esc(remote)}</td>
+    <td><strong>${evt.score || 0}</strong></td>
+    <td>${esc(evt.confidence)}</td>
+    <td>${evidenceHtml}</td>`;
+  tbody.prepend(tr); // 新事件在最上面
 }

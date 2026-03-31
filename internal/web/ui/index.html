@@ -74,6 +74,7 @@
       <button class="tab" onclick="switchTab('integrity')">完整性</button>
       <button class="tab" onclick="switchTab('preflight')">预检</button>
       <button class="tab" onclick="switchTab('errors')">错误</button>
+      <button class="tab" onclick="switchTab('watch')" id="tab-btn-watch">IOC 监控</button>
     </div>
 
     <!-- 进程表 -->
@@ -126,6 +127,25 @@
     <!-- 错误 -->
     <div id="tab-errors" class="tab-content">
       <div id="errors-content"><p class="muted">无错误</p></div>
+    </div>
+
+    <!-- IOC 监控 -->
+    <div id="tab-watch" class="tab-content">
+      <div class="toolbar">
+        <textarea id="watch-iocs" rows="4" placeholder="输入 IOC 列表，每行一个 IP 或域名&#10;1.2.3.4&#10;evil.example.com&#10;10.0.0.1 c2,apt28" style="flex:1;resize:vertical;background:var(--bg);border:1px solid var(--border);border-radius:6px;color:var(--text);font-size:12px;font-family:monospace;padding:8px"></textarea>
+        <div style="display:flex;flex-direction:column;gap:6px">
+          <button id="btn-watch-start" class="btn btn-primary" onclick="startWatch()">开始监控</button>
+          <button id="btn-watch-stop" class="btn btn-secondary" onclick="stopWatch()" disabled>停止监控</button>
+          <label style="font-size:11px;color:var(--text2)">间隔<input type="number" id="watch-interval" value="3" min="1" max="60" style="width:40px;background:var(--bg);border:1px solid var(--border);color:var(--text);border-radius:4px;padding:2px 4px;margin-left:4px">秒</label>
+        </div>
+      </div>
+      <div id="watch-status" style="margin-bottom:10px"></div>
+      <div class="table-wrap" style="max-height:50vh;overflow:auto">
+        <table id="watch-table">
+          <thead><tr><th>时间</th><th>严重度</th><th>IOC</th><th>PID</th><th>进程</th><th>远端</th><th>评分</th><th>可信度</th><th>证据</th></tr></thead>
+          <tbody></tbody>
+        </table>
+      </div>
     </div>
   </section>
 </div>
