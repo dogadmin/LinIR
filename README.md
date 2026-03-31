@@ -324,6 +324,42 @@ sudo ./linir bundle --output-dir /tmp/evidence
 
 ---
 
+### `linir gui` — Web 可视化仪表盘
+
+启动本地 HTTP 服务器，在浏览器中打开交互式取证仪表盘。所有数据仅在本机（127.0.0.1），不暴露到网络。
+
+| 参数 | 说明 | 默认值 |
+|---|---|---|
+| `--port` | HTTP 服务器端口 | `18080` |
+
+```bash
+# 启动仪表盘
+sudo ./linir gui
+
+# 自定义端口
+sudo ./linir gui --port 9090
+```
+
+启动后自动打开默认浏览器（macOS 用 `open`，Linux 用 `xdg-open`）。如果无法自动打开，手动访问 `http://127.0.0.1:18080`。
+
+**仪表盘功能：**
+
+| 区域 | 功能 |
+|---|---|
+| **顶栏** | 一键采集按钮、采集状态指示（等待/进行中/完成/失败）、JSON 导出 |
+| **概览卡片** | 风险评分（颜色随严重度变化）、主机可信度、进程/连接/持久化/YARA 计数及可疑数 |
+| **证据面板** | 逐条列出评分证据：严重度、域、规则名、描述、分值 |
+| **进程表** | PID/PPID/用户/进程名/exe/可疑标记，支持搜索过滤 + "仅显示可疑"勾选 |
+| **网络表** | 协议/地址端口/状态/PID/进程名/标记，支持搜索 |
+| **持久化表** | 类型/路径/目标/作用域/风险标记，高风险行红色高亮 |
+| **完整性** | rootkit 疑似、kernel taint、各类视图不一致、建议操作 |
+| **预检** | 自检结果、loader/PATH/环境变量/shell profile 异常 |
+| **错误** | 采集过程中的非致命错误 |
+
+> GUI 基于 `go:embed` 将 HTML/CSS/JS 打包到二进制中，无额外文件。暗色主题，响应式布局，支持移动端浏览器。
+
+---
+
 ## 典型工作流
 
 ### 场景一：服务器疑似失陷，快速分诊
@@ -356,7 +392,20 @@ sudo ./linir collect \
   --output-dir /evidence/$(hostname)-$(date +%Y%m%d)
 ```
 
-### 场景三：仅检查主机环境是否可信
+### 场景三：macOS 桌面可视化分析
+
+```bash
+# 在 macOS 上直接打开可视化仪表盘
+sudo ./linir gui
+
+# 或通过 SSH 转发在远程 Linux 上使用
+ssh -L 18080:127.0.0.1:18080 root@target
+# 在 target 上执行：
+sudo ./linir gui
+# 本地浏览器打开 http://127.0.0.1:18080
+```
+
+### 场景四：仅检查主机环境是否可信
 
 ```bash
 ./linir preflight --format text
@@ -367,6 +416,14 @@ sudo ./linir collect \
 Host Trust Level:      low
 Loader Anomaly:        LD_PRELOAD=/lib/x86_64-linux-gnu/libhook.so
 Shell Profile Anomaly: /etc/profile.d/backdoor.sh: 发现可疑模式 'curl ' (network_download)
+```
+
+### 场景五：采集 CSV 用 Excel 做进一步分析
+
+```bash
+sudo ./linir collect --format all --output-dir ./evidence
+# 生成 JSON + 文本 + 7 个 CSV 表格
+# CSV 带 UTF-8 BOM，Excel 双击直接打开不乱码
 ```
 
 ---
@@ -483,7 +540,14 @@ linir collect
     ├── YARA 扫描器        带条件求值的文件扫描
     ├── 证据评分器         14 条规则的加权评分
     │
-    └── 输出              JSON + 文本 + 分诊包
+    └── 输出              JSON + 文本 + CSV + 分诊包
+
+linir gui
+    │
+    ├── HTTP 服务器        127.0.0.1:18080，go:embed 内嵌资源
+    ├── /api/collect       POST 触发采集，返回 JSON
+    ├── /api/result        GET 上次采集结果
+    └── 浏览器仪表盘       暗色主题，响应式，交互式表格
 ```
 
 ---

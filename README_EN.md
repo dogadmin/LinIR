@@ -64,7 +64,7 @@ These flags apply to all subcommands:
 | Flag | Short | Description | Default |
 |---|---|---|---|
 | `--output-dir` | `-o` | Directory for output files | `.` (current dir) |
-| `--format` | | Output format: `json`, `text`, `both` | `both` |
+| `--format` | | Output format: `json`, `text`, `csv`, `both` (json+text), `all` (json+text+csv) | `both` |
 | `--bundle` | | Also generate a tar.gz triage bundle | off |
 | `--force` | | Continue collection even if preflight finds high-risk issues | off |
 | `--verbose` | `-v` | Verbose logging | off |
@@ -184,6 +184,44 @@ sudo ./linir bundle --output-dir /tmp/evidence
 ```
 
 Bundle contents: `host.json`, `self_check.json`, `preflight.json`, `processes.json`, `connections.json`, `persistence.json`, `integrity.json`, `yara_hits.json`, `score.json`, `errors.json`, `full.json`.
+
+---
+
+### `linir gui` — Web GUI Dashboard
+
+Starts a local HTTP server and opens an interactive forensic dashboard in your default browser. All data stays local (127.0.0.1 only).
+
+| Flag | Description | Default |
+|---|---|---|
+| `--port` | HTTP server port | `18080` |
+
+```bash
+sudo ./linir gui
+sudo ./linir gui --port 9090
+```
+
+**Dashboard features:**
+- Risk score cards with color-coded severity
+- Host trust level indicator
+- Interactive process/network/persistence tables with search and filter
+- Evidence breakdown with per-rule scoring details
+- Integrity check results and preflight anomaly visualization
+- One-click collection trigger and JSON export from browser
+- Dark theme, responsive layout, embedded via `go:embed`
+
+> Works on macOS desktop, Linux with X11/Wayland, or remote via SSH port forwarding (`ssh -L 18080:127.0.0.1:18080 root@target`).
+
+---
+
+### CSV Output
+
+```bash
+sudo ./linir collect --format csv    # CSV only
+sudo ./linir collect --format all    # JSON + text + CSV
+```
+
+Generates 7 CSV files (UTF-8 BOM for Excel compatibility):
+`*-summary.csv`, `*-processes.csv`, `*-connections.csv`, `*-persistence.csv`, `*-evidence.csv`, `*-yara.csv`, `*-integrity.csv`.
 
 ---
 
