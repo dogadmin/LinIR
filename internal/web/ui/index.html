@@ -1,0 +1,134 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>LinIR - 应急响应仪表盘</title>
+<link rel="stylesheet" href="/css/style.css">
+</head>
+<body>
+
+<header>
+  <div class="header-left">
+    <h1>LinIR</h1>
+    <span class="subtitle">应急响应取证仪表盘</span>
+  </div>
+  <div class="header-right">
+    <span id="status" class="badge badge-waiting">等待采集</span>
+    <button id="btn-collect" class="btn btn-primary" onclick="startCollect()">开始采集</button>
+    <button id="btn-export" class="btn btn-secondary" onclick="exportJSON()" disabled>导出 JSON</button>
+  </div>
+</header>
+
+<div id="app">
+  <!-- 概览卡片 -->
+  <section id="overview" class="cards">
+    <div class="card card-score" id="card-score">
+      <div class="card-label">风险评分</div>
+      <div class="card-value" id="v-score">—</div>
+      <div class="card-sub" id="v-severity">等待采集</div>
+    </div>
+    <div class="card">
+      <div class="card-label">主机可信度</div>
+      <div class="card-value" id="v-trust">—</div>
+      <div class="card-sub" id="v-hostname">—</div>
+    </div>
+    <div class="card">
+      <div class="card-label">进程数</div>
+      <div class="card-value" id="v-procs">—</div>
+      <div class="card-sub" id="v-procs-suspicious">—</div>
+    </div>
+    <div class="card">
+      <div class="card-label">网络连接</div>
+      <div class="card-value" id="v-conns">—</div>
+      <div class="card-sub" id="v-conns-suspicious">—</div>
+    </div>
+    <div class="card">
+      <div class="card-label">持久化项</div>
+      <div class="card-value" id="v-persist">—</div>
+      <div class="card-sub" id="v-persist-risky">—</div>
+    </div>
+    <div class="card">
+      <div class="card-label">YARA 命中</div>
+      <div class="card-value" id="v-yara">—</div>
+      <div class="card-sub">规则匹配</div>
+    </div>
+  </section>
+
+  <!-- 证据列表 -->
+  <section id="evidence-section" class="panel" style="display:none">
+    <h2>风险证据</h2>
+    <table id="evidence-table">
+      <thead><tr><th>严重度</th><th>域</th><th>规则</th><th>描述</th><th>分值</th></tr></thead>
+      <tbody></tbody>
+    </table>
+  </section>
+
+  <!-- 选项卡 -->
+  <section class="tabs-container">
+    <div class="tabs">
+      <button class="tab active" onclick="switchTab('processes')">进程</button>
+      <button class="tab" onclick="switchTab('connections')">网络</button>
+      <button class="tab" onclick="switchTab('persistence')">持久化</button>
+      <button class="tab" onclick="switchTab('integrity')">完整性</button>
+      <button class="tab" onclick="switchTab('preflight')">预检</button>
+      <button class="tab" onclick="switchTab('errors')">错误</button>
+    </div>
+
+    <!-- 进程表 -->
+    <div id="tab-processes" class="tab-content active">
+      <div class="toolbar">
+        <input type="text" id="proc-filter" placeholder="搜索进程名/PID/路径..." oninput="filterTable('proc-table', this.value)">
+        <label><input type="checkbox" id="proc-suspicious-only" onchange="toggleSuspiciousOnly()"> 仅显示可疑</label>
+      </div>
+      <div class="table-wrap">
+        <table id="proc-table">
+          <thead><tr><th>PID</th><th>PPID</th><th>用户</th><th>进程名</th><th>可执行路径</th><th>标记</th></tr></thead>
+          <tbody></tbody>
+        </table>
+      </div>
+    </div>
+
+    <!-- 网络表 -->
+    <div id="tab-connections" class="tab-content">
+      <div class="toolbar">
+        <input type="text" id="conn-filter" placeholder="搜索地址/端口/PID..." oninput="filterTable('conn-table', this.value)">
+      </div>
+      <div class="table-wrap">
+        <table id="conn-table">
+          <thead><tr><th>协议</th><th>本地地址</th><th>本地端口</th><th>远端地址</th><th>远端端口</th><th>状态</th><th>PID</th><th>进程</th><th>标记</th></tr></thead>
+          <tbody></tbody>
+        </table>
+      </div>
+    </div>
+
+    <!-- 持久化表 -->
+    <div id="tab-persistence" class="tab-content">
+      <div class="table-wrap">
+        <table id="persist-table">
+          <thead><tr><th>类型</th><th>路径</th><th>目标</th><th>作用域</th><th>风险标记</th></tr></thead>
+          <tbody></tbody>
+        </table>
+      </div>
+    </div>
+
+    <!-- 完整性 -->
+    <div id="tab-integrity" class="tab-content">
+      <div id="integrity-content"><p class="muted">等待采集...</p></div>
+    </div>
+
+    <!-- 预检 -->
+    <div id="tab-preflight" class="tab-content">
+      <div id="preflight-content"><p class="muted">等待采集...</p></div>
+    </div>
+
+    <!-- 错误 -->
+    <div id="tab-errors" class="tab-content">
+      <div id="errors-content"><p class="muted">无错误</p></div>
+    </div>
+  </section>
+</div>
+
+<script src="/js/app.js"></script>
+</body>
+</html>

@@ -41,6 +41,7 @@ and cross-source validation.`,
 		newIntegrityCmd(cfg),
 		newYaraCmd(cfg),
 		newBundleCmd(cfg),
+		newGuiCmd(cfg),
 	)
 
 	return root
