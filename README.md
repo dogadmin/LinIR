@@ -324,6 +324,73 @@ sudo ./linir bundle --output-dir /tmp/evidence
 
 ---
 
+### `linir watch` — IOC 在线监控
+
+持续监控主机网络连接，与 IOC 列表实时比对。命中后立即补采进程、二进制、持久化、YARA、完整性上下文，形成结构化、可评分的命中事件。
+
+**核心设计：IOC 命中不是结论，而是触发器。** 命中后拉取运行态上下文，组合评分，再判断风险级别。
+
+| 参数 | 说明 | 默认值 |
+|---|---|---|
+| `--iocs` | **必填**。IOC 列表文件路径（每行一个 IP 或域名，# 为注释） | 无 |
+| `--duration` | 监控总时长（秒），0 表示无限 | `0` |
+| `--interval` | 轮询间隔（秒） | `3` |
+| `--json` | 输出 JSONL 事件到文件 | 关闭 |
+| `--text` | 输出彩色文本到 stdout | 开启 |
+| `--bundle` | 每个事件输出独立目录（含 process/persistence/event JSON） | 关闭 |
+| `--whitelist` | 白名单文件路径 | 无 |
+| `--max-events` | 每分钟最大事件数（0=不限） | `0` |
+| `--yara-rules` | YARA 规则路径，命中后扫描进程 exe | 无 |
+
+```bash
+# 基础监控
+sudo ./linir watch --iocs ./iocs.txt
+
+# 限时 10 分钟，2 秒轮询，输出 JSONL
+sudo ./linir watch --iocs ./iocs.txt --duration 600 --interval 2 --json
+
+# 带白名单和 YARA
+sudo ./linir watch --iocs ./iocs.txt --whitelist ./whitelist.txt --yara-rules ./rules/
+
+# 每分钟最多 10 个事件（防刷屏）
+sudo ./linir watch --iocs ./iocs.txt --max-events 10
+```
+
+**IOC 文件格式：**
+```
+# 注释行
+1.2.3.4
+10.0.0.1 c2,apt28
+evil.example.com
+```
+
+**白名单文件格式：**
+```
+process:sshd
+path:/usr/lib/systemd/
+ioc:8.8.8.8
+```
+
+**命中事件评分模型：**
+
+| 指标 | 分值 | 说明 |
+|---|---|---|
+| IOC 命中 | +20 | 基础分 |
+| exe 在临时目录 | +25 | 二进制可疑 |
+| exe 已被删除 | +15 | 二进制异常 |
+| 进程关联持久化 | +20 | 多维关联 |
+| YARA 规则命中 | +30 | 规则确认 |
+| 进程信息不可见 | +20 | 可见性异常 |
+| 二进制不存在 | +15 | 文件异常 |
+
+每个事件输出：IOC、连接详情、进程上下文、二进制哈希、持久化关联、YARA 命中、完整性状态、评分、严重度、可信度、证据列表。
+
+**去重机制：** 同一 IOC + 同一 PID + 同一连接在 60 秒窗口内只报一次。
+
+> watch 模式也集成在 GUI 仪表盘中（"IOC 监控"选项卡），支持在浏览器中输入 IOC 列表、实时查看命中事件流。
+
+---
+
 ### `linir gui` — Web 可视化仪表盘
 
 启动本地 HTTP 服务器，在浏览器中打开交互式取证仪表盘。所有数据仅在本机（127.0.0.1），不暴露到网络。
@@ -355,6 +422,7 @@ sudo ./linir gui --port 9090
 | **完整性** | rootkit 疑似、kernel taint、各类视图不一致、建议操作 |
 | **预检** | 自检结果、loader/PATH/环境变量/shell profile 异常 |
 | **错误** | 采集过程中的非致命错误 |
+| **IOC 监控** | 输入 IOC 列表 → 开始/停止监控 → SSE 实时事件流 → 命中表格（时间/严重度/IOC/PID/进程/评分/证据） |
 
 > GUI 基于 `go:embed` 将 HTML/CSS/JS 打包到二进制中，无额外文件。暗色主题，响应式布局，支持移动端浏览器。
 
@@ -424,6 +492,23 @@ Shell Profile Anomaly: /etc/profile.d/backdoor.sh: 发现可疑模式 'curl ' (n
 sudo ./linir collect --format all --output-dir ./evidence
 # 生成 JSON + 文本 + 7 个 CSV 表格
 # CSV 带 UTF-8 BOM，Excel 双击直接打开不乱码
+```
+
+### 场景六：IOC 在线监控
+
+```bash
+# 准备 IOC 文件
+cat > iocs.txt << 'EOF'
+1.2.3.4
+10.0.0.1 c2
+evil.example.com
+EOF
+
+# 监控 10 分钟，带 YARA 和白名单
+sudo ./linir watch --iocs iocs.txt --duration 600 --yara-rules ./rules/ --json
+
+# 或在 GUI 中操作：打开仪表盘 → IOC 监控选项卡 → 粘贴 IOC → 开始监控
+sudo ./linir gui
 ```
 
 ---
@@ -542,12 +627,22 @@ linir collect
     │
     └── 输出              JSON + 文本 + CSV + 分诊包
 
+linir watch --iocs ./iocs.txt
+    │
+    ├── 加载 IOC 列表       IP + Domain 自动识别
+    ├── 主循环（每 N 秒）
+    │     ├── 连接快照       复用 network collector
+    │     ├── IOC 比对       IP 直匹配
+    │     ├── 去重/频控      窗口 + rate limit + 白名单
+    │     └── 命中 → 补采    进程 + 二进制 + 持久化 + YARA + 完整性
+    └── 输出                彩色文本 / JSONL / 事件 bundle
+
 linir gui
     │
     ├── HTTP 服务器        127.0.0.1:18080，go:embed 内嵌资源
     ├── /api/collect       POST 触发采集，返回 JSON
-    ├── /api/result        GET 上次采集结果
-    └── 浏览器仪表盘       暗色主题，响应式，交互式表格
+    ├── /api/watch/*       IOC 监控（启动/停止/SSE 事件流）
+    └── 浏览器仪表盘       暗色主题，响应式，交互式表格 + IOC 监控
 ```
 
 ---

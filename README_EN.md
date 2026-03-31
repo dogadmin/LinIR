@@ -187,6 +187,34 @@ Bundle contents: `host.json`, `self_check.json`, `preflight.json`, `processes.js
 
 ---
 
+### `linir watch` — IOC Online Monitoring
+
+Continuously monitors network connections against an IOC list. On match, immediately collects process, binary, persistence, YARA, and integrity context to produce a scored hit event.
+
+**Core design: IOC hit is a trigger, not a verdict.** Context is recovered first, then scored.
+
+| Flag | Description | Default |
+|---|---|---|
+| `--iocs` | **Required.** IOC list file (one IP/domain per line, # for comments) | none |
+| `--duration` | Monitor duration in seconds (0=unlimited) | `0` |
+| `--interval` | Polling interval in seconds | `3` |
+| `--json` | Output JSONL events to file | off |
+| `--text` | Output colored text to stdout | on |
+| `--bundle` | Output per-event bundle directories | off |
+| `--whitelist` | Whitelist file (process:/path:/ioc: prefixes) | none |
+| `--max-events` | Max events per minute (0=unlimited) | `0` |
+| `--yara-rules` | YARA rules for scanning hit process executables | none |
+
+```bash
+sudo ./linir watch --iocs ./iocs.txt
+sudo ./linir watch --iocs ./iocs.txt --duration 600 --interval 2 --json
+sudo ./linir watch --iocs ./iocs.txt --whitelist ./wl.txt --yara-rules ./rules/
+```
+
+> Also available in the GUI dashboard ("IOC 监控" tab) with real-time SSE event streaming.
+
+---
+
 ### `linir gui` — Web GUI Dashboard
 
 Starts a local HTTP server and opens an interactive forensic dashboard in your default browser. All data stays local (127.0.0.1 only).
