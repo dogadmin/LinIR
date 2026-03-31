@@ -1,0 +1,116 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        include:
+          # Linux
+          - goos: linux
+            goarch: amd64
+            suffix: linux-amd64
+          - goos: linux
+            goarch: arm64
+            suffix: linux-arm64
+          - goos: linux
+            goarch: 386
+            suffix: linux-386
+          - goos: linux
+            goarch: arm
+            goarm: 7
+            suffix: linux-armv7
+          - goos: linux
+            goarch: mips64le
+            suffix: linux-mips64le
+          - goos: linux
+            goarch: ppc64le
+            suffix: linux-ppc64le
+          - goos: linux
+            goarch: s390x
+            suffix: linux-s390x
+          - goos: linux
+            goarch: riscv64
+            suffix: linux-riscv64
+          # macOS
+          - goos: darwin
+            goarch: amd64
+            suffix: darwin-amd64
+          - goos: darwin
+            goarch: arm64
+            suffix: darwin-arm64
+          # FreeBSD
+          - goos: freebsd
+            goarch: amd64
+            suffix: freebsd-amd64
+          - goos: freebsd
+            goarch: arm64
+            suffix: freebsd-arm64
+          # OpenBSD
+          - goos: openbsd
+            goarch: amd64
+            suffix: openbsd-amd64
+          # NetBSD
+          - goos: netbsd
+            goarch: amd64
+            suffix: netbsd-amd64
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.23'
+
+      - name: Build
+        env:
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+          GOARM: ${{ matrix.goarm }}
+          CGO_ENABLED: '0'
+        run: |
+          VERSION=${GITHUB_REF#refs/tags/}
+          LDFLAGS="-s -w -X github.com/dogadmin/LinIR/internal/config.Version=${VERSION}"
+          go build -ldflags="${LDFLAGS}" -o linir-${VERSION}-${{ matrix.suffix }} ./cmd/linir
+
+      - name: Compress (tar.gz)
+        run: |
+          VERSION=${GITHUB_REF#refs/tags/}
+          BINARY=linir-${VERSION}-${{ matrix.suffix }}
+          tar czf ${BINARY}.tar.gz ${BINARY}
+          sha256sum ${BINARY}.tar.gz > ${BINARY}.tar.gz.sha256
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: linir-${{ matrix.suffix }}
+          path: |
+            linir-*.tar.gz
+            linir-*.sha256
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          merge-multiple: true
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            linir-*.tar.gz
+            linir-*.sha256
+          generate_release_notes: true
+          draft: false
+          prerelease: false

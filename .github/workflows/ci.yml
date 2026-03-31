@@ -1,0 +1,44 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  build-and-vet:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        goos: [linux, darwin, freebsd, openbsd, netbsd]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.23'
+
+      - name: Vet
+        env:
+          GOOS: ${{ matrix.goos }}
+        run: go vet ./...
+
+      - name: Build
+        env:
+          GOOS: ${{ matrix.goos }}
+          GOARCH: amd64
+          CGO_ENABLED: '0'
+        run: go build -o /dev/null ./cmd/linir
+
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.23'
+
+      - name: Test
+        run: go test ./...
