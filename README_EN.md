@@ -2,63 +2,27 @@
 
 **Linux/macOS Incident Response & Forensic Collection Tool**
 
-[中文文档](README.md)
+[中文文档](README.md) | [Full Feature List & Scoring Rules](FEATURES.md)
 
 ---
 
-## What is LinIR?
+## Overview
 
-LinIR is a single-binary, zero-dependency forensic triage tool designed for **compromised or untrusted host environments**. It collects process, network, persistence, and integrity evidence directly from kernel interfaces and filesystem structures — without relying on any commands installed on the target machine.
+LinIR is a single-binary, zero-dependency forensic triage tool for **compromised or untrusted host environments**. It collects process, network, persistence, and integrity evidence directly from kernel interfaces — without calling any commands installed on the target.
 
-### The Core Problem
-
-When you land on a potentially compromised Linux or macOS host, you cannot trust:
-
-- `ps`, `top`, `netstat`, `ss`, `lsof` — may have been replaced
-- `systemctl`, `launchctl`, `crontab` — output may be filtered
-- `PATH`, `LD_PRELOAD`, `DYLD_INSERT_LIBRARIES` — may be poisoned
-- Shell aliases and functions — may intercept commands
-- Dynamic linker — may be hijacked
-
-**LinIR's answer: don't call any of them.** Read `/proc` directly. Parse ELF/Mach-O/plist files directly. Use raw syscalls. Cross-validate across multiple data sources. Report evidence, not conclusions.
+**Principles:** No external commands · Zero trust · Cross-source validation · Evidence over verdicts · Static single binary
 
 ---
 
-## Design Principles
+## Quick Start
 
-| Principle | Description |
-|---|---|
-| **No external commands** | All collection reads kernel interfaces (`/proc`, `/sys`, `sysctl`) and filesystem structures directly. Never calls `ps`, `netstat`, `lsof`, `systemctl`, `launchctl`, or any shell pipeline. |
-| **Zero trust environment** | Assumes PATH is poisoned, LD_PRELOAD is active, binaries are replaced. Self-checks its own execution environment before collecting. |
-| **Cross-source validation** | Compares process view, network view, file view, and kernel module view. Inconsistencies are flagged as visibility anomalies. |
-| **Evidence over verdicts** | Outputs structured evidence with source attribution and confidence levels. Does not claim "malware found" — reports "these data points are inconsistent". |
-| **Static binary, single file** | `CGO_ENABLED=0` static compilation. Drop onto target, run, collect, leave. No runtime dependencies. |
-
----
-
-## Collection Capabilities
-
-### Self-Check & Preflight
-
-- Binary self-integrity hash
-- `LD_PRELOAD` / `LD_LIBRARY_PATH` / `LD_AUDIT` detection
-- `DYLD_INSERT_LIBRARIES` and all `DYLD_*` detection
-- `/etc/ld.so.preload` content audit
-- `/proc/self/exe` path verification and `/proc/self/maps` non-standard library detection
-- PATH poisoning detection (relative dirs, temp dirs, world-writable dirs)
-- Container / namespace / chroot detection
-- Host trust level assessment (high / medium / low)
-
-### Network Collection
-
-| Platform | Data Source | Details |
-|---|---|---|
-| Linux | `/proc/net/tcp`, `tcp6`, `udp`, `udp6`, `raw`, `raw6`, `unix` + `/proc/<pid>/fd/*` inode mapping | Protocol, address:port, state, PID via socket inode. IPv4-mapped IPv6 (`::ffff:x.x.x.x`) auto-normalized to IPv4 |
-| macOS | Dual-source merge: `proc_pidfdinfo` (PID association) + `sysctl pcblist_n` (global view, not restricted by SIP) | Protocol, address:port, TCP state, PID + process name. Sysctl-extracted PIDs validated against process list |
-
-### Process, Persistence, Integrity, YARA, Scoring
-
-See the [Chinese README](README.md) for detailed tables on data sources, collected fields, and risk flags per platform. The capabilities are identical regardless of language.
+```bash
+sudo ./linir collect                                    # Full collection
+sudo ./linir collect --yara-rules /opt/rules/ --bundle  # With YARA + bundle
+sudo ./linir watch --iocs ./iocs.txt                    # IOC monitoring
+sudo ./linir gui                                        # Web dashboard
+sudo ./linir preflight --format text                    # Environment check
+```
 
 ---
 
@@ -66,282 +30,144 @@ See the [Chinese README](README.md) for detailed tables on data sources, collect
 
 ### Global Flags
 
-These flags apply to all subcommands:
-
 | Flag | Short | Description | Default |
 |---|---|---|---|
-| `--output-dir` | `-o` | Directory for output files | `.` (current dir) |
-| `--format` | | Output format: `json`, `text`, `csv`, `both` (json+text), `all` (json+text+csv) | `both` |
-| `--bundle` | | Also generate a tar.gz triage bundle | off |
-| `--force` | | Continue collection even if preflight finds high-risk issues | off |
+| `--output-dir` | `-o` | Output directory | `.` |
+| `--format` | | `json` / `text` / `csv` / `both` / `all` | `both` |
+| `--bundle` | | Generate tar.gz triage bundle | off |
+| `--force` | | Continue despite preflight failures | off |
 | `--verbose` | `-v` | Verbose logging | off |
-| `--quiet` | `-q` | Suppress stdout (keep only file output and errors) | off |
-| `--timeout` | | Global timeout in seconds; aborts collection when exceeded | `300` |
+| `--quiet` | `-q` | Suppress stdout | off |
+| `--timeout` | | Global timeout (seconds) | `300` |
 
----
+### Subcommands
 
-### `linir collect` — Full Collection
+| Command | Description | Extra Flags |
+|---------|-------------|-------------|
+| `collect` | Full forensic pipeline | `--hash-processes` `--collect-env` `--yara-rules` |
+| `preflight` | Environment trust check only | — |
+| `process` | Process collection only | `--hash-processes` `--collect-env` |
+| `network` | Network connections only | — |
+| `persistence` | Persistence enumeration only | — |
+| `integrity` | Cross-source visibility checks | — |
+| `yara` | YARA scanning | `--rules`(required) `--target` `--proc-linked` |
+| `bundle` | Equivalent to `collect --bundle` | — |
+| `watch` | Real-time IOC monitoring | See below |
+| `gui` | Web dashboard | `--host` `--port` |
 
-Runs all phases: self-check → preflight → process → network → persistence → integrity → correlation → YARA → scoring → output.
-
-**This is the most common command for incident response.**
-
-| Flag | Description | Default |
-|---|---|---|
-| `--hash-processes` | Compute SHA256 of each process executable (slow, useful for IOC matching) | off |
-| `--collect-env` | Collect process environment variables (sensitive — may contain secrets) | off |
-| `--yara-rules` | Path to YARA rule file or directory. Enables YARA scanning in the collection pipeline | none |
-
-```bash
-sudo ./linir collect
-sudo ./linir collect --format json --bundle --output-dir /tmp/evidence
-sudo ./linir collect --yara-rules /opt/yara-rules/ --hash-processes
-sudo ./linir collect --force --bundle
-```
-
----
-
-### `linir preflight` — Environment Trust Assessment
-
-Runs only self-check and preflight. Quick assessment of host trustworthiness without data collection.
-
-No additional flags.
-
-```bash
-sudo ./linir preflight --format json
-sudo ./linir preflight --format text
-```
-
----
-
-### `linir process` — Process Collection
-
-Collects process information only.
+### watch Flags
 
 | Flag | Description | Default |
 |---|---|---|
-| `--hash-processes` | Compute SHA256 of each process executable | off |
-| `--collect-env` | Collect process environment variables (max 50 per process) | off |
+| `--iocs` | IOC list file (required) | — |
+| `--duration` | Monitor duration (seconds), 0=unlimited | `0` |
+| `--interval` | Polling interval (seconds) | `1` |
+| `--json` | Output JSONL events | off |
+| `--text` | Output colored text | on |
+| `--bundle` | Per-event bundle directories | off |
+| `--whitelist` | Whitelist file | — |
+| `--max-events` | Max events/minute | `0` |
+| `--yara-rules` | YARA rules for hit scanning | — |
+| `--iface` | Network interface | auto |
 
-```bash
-sudo ./linir process --format json
-sudo ./linir process --hash-processes --collect-env
-```
-
----
-
-### `linir network` — Network Connection Collection
-
-Collects network connections only. No additional flags.
-
-```bash
-sudo ./linir network --format json
-```
-
----
-
-### `linir persistence` — Persistence Enumeration
-
-Enumerates all persistence mechanisms. No additional flags.
-
-```bash
-sudo ./linir persistence --format json
-```
-
----
-
-### `linir integrity` — Integrity & Anti-Rootkit Checks
-
-Cross-source visibility validation. Automatically collects process/network/persistence data first.
-
-No additional flags.
-
-```bash
-sudo ./linir integrity --format json
-```
-
----
-
-### `linir yara` — YARA Rule Scanning
+### gui Flags
 
 | Flag | Description | Default |
 |---|---|---|
-| `--rules` | **Required.** Path to YARA rule file or directory (recursively loads `.yar`/`.yara`/`.rule`) | none |
-| `--target` | Scan all files in the specified directory | none |
-| `--proc-linked` | Smart target selection: scan networked process executables, persistence targets, temp directories | off |
-
-If neither `--target` nor `--proc-linked` is specified, `--proc-linked` is enabled by default.
-
-```bash
-sudo ./linir yara --rules /opt/yara-rules/ --target /tmp
-sudo ./linir yara --rules /opt/yara-rules/ --proc-linked
-sudo ./linir yara --rules ./rules/ --target /var/www --proc-linked
-```
+| `--host` | Listen address (`0.0.0.0` for external) | `127.0.0.1` |
+| `--port` | HTTP port | `18080` |
 
 ---
 
-### `linir bundle` — Triage Bundle Export
+## Collection Capabilities
 
-Runs full collection and packages results as tar.gz. Equivalent to `linir collect --bundle`.
-
-No additional flags.
-
-```bash
-sudo ./linir bundle --output-dir /tmp/evidence
-```
-
-Bundle contents: `host.json`, `self_check.json`, `preflight.json`, `processes.json`, `connections.json`, `persistence.json`, `integrity.json`, `yara_hits.json`, `score.json`, `errors.json`, `full.json`.
+| Domain | Linux | macOS |
+|--------|-------|-------|
+| **Process** | `/proc/<pid>/*` (stat, cmdline, exe, fd, maps) | sysctl + proc_pidpath + KERN_PROCARGS2 |
+| **Network** | `/proc/net/tcp*`, `udp*`, `raw*` + inode→PID | proc_pidfdinfo + sysctl pcblist_n |
+| **Persistence** | systemd, cron, shell profiles, SSH, ld.so.preload | LaunchDaemons/Agents, cron, profiles, SSH |
+| **Integrity** | Process/network/file/module cross-validation, kernel taint | Process/network/file cross-validation |
+| **YARA** | Pure Go engine, condition subset | Same |
 
 ---
 
-### `linir watch` — IOC Online Monitoring
+## IOC Monitoring
 
-Continuously monitors network connections against an IOC list. On match, immediately collects process, binary, persistence, YARA, and integrity context to produce a scored hit event.
+### Three-Tier Architecture
 
-**Core design: IOC hit is a trigger, not a verdict.** Context is recovered first, then scored.
+| Tier | Linux | macOS |
+|---|---|---|
+| 1 | conntrack netlink (event-driven) | BPF /dev/bpf (TCP SYN + UDP) |
+| 2 | /proc/net/nf_conntrack | — |
+| 3 | /proc/net/tcp polling | proc_pidfdinfo + sysctl polling |
 
-**Three-tier monitoring (automatically selects the best available):**
+**PID Resolution:** Targeted inode lookup (~10-50ms) → retry → pending queue → 5s timeout fallback.
 
-| Tier | Linux | macOS | Characteristics |
+**Dedup:** Full 5-tuple + IOC value. Each real connection is a separate event.
+
+**Domain IOC:** Auto DNS-resolved to IPs at load time.
+
+---
+
+## Scoring
+
+**Design:** Single-clue low scores · Combo escalation · Confidence separation · YARA 4-tier · Suppress mechanism
+
+| Indicator | Base | Combo | Severity |
 |---|---|---|---|
-| Tier 1 | conntrack (netlink event-driven) | BPF (/dev/bpf packet capture) | Zero-loss, captures at SYN phase, requires CAP_NET_ADMIN/root |
-| Tier 2 | /proc/net/nf_conntrack polling | — | RST entries retained ~10s, requires nf_conntrack module |
-| Tier 3 | /proc/net/tcp polling | proc_pidfdinfo + sysctl polling | Universal fallback, may miss short-lived connections |
+| exe in /tmp | +10 | +networked +10, +interpreter +5 | low→medium |
+| Web shell (strong) | +25 | +network = strong | high |
+| Persistence in /tmp | +15 | +active +10, +networked +10 | medium→high |
+| /dev/tcp reverse shell | +25 | +active +10 | critical |
+| YARA hit | +10/+15/+20/+25 | +active process +5, +tmp path +5 | by severity_hint |
+| Rootkit suspected | +15 | Primarily affects confidence | high |
+| 7 combo rules | | +10~+15 | high→critical |
 
-In event-driven mode (Tier 1), conntrack/BPF events trigger an immediate fresh `CollectConnections` to resolve the process PID, ensuring hit events include full process context.
+**Suppress:** Parent is package manager → half score. exe_deleted with no network/persistence/YARA → zero score.
 
-**Domain IOC support:** Domain IOCs are automatically DNS-resolved to IPs at load time and matched alongside IP IOCs.
+**Confidence:** host_trust_low and orphan_connections affect confidence, not score. Recorded in `integrity_flags`.
 
-| Flag | Description | Default |
+Score 0-100. Severity: info / low / medium / high / critical.
+
+> Full rules: [FEATURES.md](FEATURES.md)
+
+---
+
+## Output Formats
+
+| Format | File | Use |
 |---|---|---|
-| `--iocs` | **Required.** IOC list file (one IP/domain per line, # for comments) | none |
-| `--duration` | Monitor duration in seconds (0=unlimited) | `0` |
-| `--interval` | Polling interval in seconds | `3` |
-| `--json` | Output JSONL events to file | off |
-| `--text` | Output colored text to stdout | on |
-| `--bundle` | Output per-event bundle directories | off |
-| `--whitelist` | Whitelist file (process:/path:/ioc: prefixes) | none |
-| `--max-events` | Max events per minute (0=unlimited) | `0` |
-| `--yara-rules` | YARA rules for scanning hit process executables | none |
-| `--interface` | Network interface name (BPF mode only, empty=auto-detect) | auto |
-
-```bash
-sudo ./linir watch --iocs ./iocs.txt
-sudo ./linir watch --iocs ./iocs.txt --duration 600 --interval 2 --json
-sudo ./linir watch --iocs ./iocs.txt --whitelist ./wl.txt --yara-rules ./rules/
-```
-
-> Also available in the GUI dashboard ("IOC Watch" tab) with real-time SSE event streaming.
+| JSON | `linir-<host>-<id>.json` | SIEM / automation |
+| Text | `linir-<host>-<id>.txt` | Human-readable |
+| CSV | `linir-<host>-<id>-*.csv` (7 tables) | Excel analysis |
+| Bundle | `linir-bundle-<host>-<id>.tar.gz` | Archive |
 
 ---
 
-### `linir gui` — Web GUI Dashboard
-
-Starts a local HTTP server and opens an interactive forensic dashboard in your default browser. Listens on 127.0.0.1 by default; use `--host` to allow external access.
-
-| Flag | Description | Default |
-|---|---|---|
-| `--host` | Listen address (`0.0.0.0` for external access) | `127.0.0.1` |
-| `--port` | HTTP server port | `18080` |
+## GUI Dashboard
 
 ```bash
-sudo ./linir gui
-sudo ./linir gui --host 0.0.0.0              # Allow LAN access
-sudo ./linir gui --host 192.168.1.100 --port 9090
+sudo ./linir gui                    # Local only
+sudo ./linir gui --host 0.0.0.0     # LAN access
 ```
 
-**Dashboard features:**
-- Risk score cards with color-coded severity
-- Host trust level indicator
-- Interactive process/network/persistence tables with search and filter
-- Evidence breakdown with per-rule scoring details
-- Integrity check results and preflight anomaly visualization
-- One-click collection trigger and JSON export from browser
-- IOC Watch tab with real-time SSE event streaming
-- Dark theme, responsive layout, embedded via `go:embed`
-
-> Works on macOS desktop, Linux with X11/Wayland, or remote via SSH port forwarding (`ssh -L 18080:127.0.0.1:18080 root@target`).
+Features: One-click collection · Risk score cards · Interactive tables · Evidence breakdown · IOC real-time SSE · YARA scanning · JSON export · Dark theme
 
 ---
 
-### CSV Output
-
-```bash
-sudo ./linir collect --format csv    # CSV only
-sudo ./linir collect --format all    # JSON + text + CSV
-```
-
-Generates 7 CSV files (UTF-8 BOM for Excel compatibility):
-`*-summary.csv`, `*-processes.csv`, `*-connections.csv`, `*-persistence.csv`, `*-evidence.csv`, `*-yara.csv`, `*-integrity.csv`.
-
----
-
-## Typical Workflows
-
-### Scenario 1: Quick triage of a suspected compromised server
-
-```bash
-scp linir-linux-amd64 root@target:/tmp/linir
-ssh root@target
-chmod +x /tmp/linir
-/tmp/linir collect --bundle --output-dir /tmp/evidence
-exit
-scp root@target:/tmp/evidence/linir-bundle-*.tar.gz ./
-tar xzf linir-bundle-*.tar.gz && cat linir-*/full.json | jq '.score'
-```
-
-### Scenario 2: Deep scan with YARA rules
-
-```bash
-sudo ./linir collect \
-  --yara-rules /opt/yara-rules/ \
-  --hash-processes \
-  --collect-env \
-  --bundle \
-  --output-dir /evidence/$(hostname)-$(date +%Y%m%d)
-```
-
-### Scenario 3: Pre-collection environment check
-
-```bash
-./linir preflight --format text
-```
-
----
-
-## Build from Source
+## Build
 
 ```bash
 git clone https://github.com/dogadmin/LinIR.git && cd LinIR
 CGO_ENABLED=0 go build -o linir ./cmd/linir
-
-# Cross-compile
-make build-linux          # Linux amd64
-make build-linux-arm64    # Linux arm64
-make build-darwin          # macOS Intel
-make build-darwin-arm64    # macOS Apple Silicon
-make build-all             # All platforms
+make build-all  # All platforms
 ```
 
-### Supported Platforms
-
-| Platform | Architectures | Process | Network | Persistence |
-|---|---|---|---|---|
-| **Linux** | amd64, arm64, 386, armv7, mips64le, ppc64le, s390x, riscv64 | Full | Full | Full |
-| **macOS** | amd64, arm64 | Full | Full | Full |
-| **FreeBSD** | amd64, arm64 | Stub | Stub | Stub |
-| **OpenBSD** | amd64 | Stub | Stub | Stub |
-| **NetBSD** | amd64 | Stub | Stub | Stub |
-
----
-
-## Known Limitations
-
-- **macOS network offsets**: `socket_fdinfo` and `xsocket_n` structs include multi-layout auto-probing. Sysctl-extracted PIDs are validated against the process list; unreliable values are automatically zeroed. If Apple changes the struct layout, connections may be skipped or marked `confidence: medium`.
-- **YARA subset**: Full PCRE, hex jumps, modules, `for` expressions, and imports are not supported. Unsupported features degrade gracefully.
-- **Hex `??` wildcard**: Simplified to `\x00` match. May cause false negatives.
-- **Non-root**: Significantly reduced visibility. Limited-access data marked `confidence: low`.
-- **Kernel rootkits**: LinIR is userspace-only. Kernel-level rootkits can evade detection.
+| Platform | Architectures | Status |
+|---|---|---|
+| **Linux** | amd64, arm64, 386, armv7, mips64le, ppc64le, s390x, riscv64 | Full |
+| **macOS** | amd64, arm64 | Full |
+| FreeBSD / OpenBSD / NetBSD | amd64 | Stub |
 
 ---
 
@@ -355,21 +181,22 @@ All pure Go. Fully statically compiled with `CGO_ENABLED=0`.
 | `github.com/google/uuid` | Collection ID |
 | `howett.net/plist` | macOS plist parsing |
 | `golang.org/x/sys` | syscall wrappers |
-| `github.com/ti-mo/conntrack` | Linux conntrack event-driven monitoring |
+| `github.com/ti-mo/conntrack` | Linux conntrack monitoring |
+
+---
+
+## Limitations
+
+- macOS network offsets: multi-version auto-probing, unreliable PIDs auto-zeroed
+- YARA subset: no full PCRE, hex jumps, modules, for expressions
+- Non-root: significantly reduced visibility, marked `confidence: low`
+- Kernel rootkits: userspace limitation, recommend offline forensics
 
 ---
 
 ## Disclaimer
 
-**LinIR is provided "AS IS" without warranty of any kind.** The authors are not responsible for any damages arising from use or misuse.
-
-**For authorized security assessments, incident response, and digital forensics only.** Ensure proper authorization before deployment. Unauthorized computer access is illegal.
-
-**LinIR is read-only** — it does not modify target system data. However, running any tool on a live system may alter volatile evidence.
-
-**Output is not definitive proof.** It provides evidence requiring professional interpretation. False positives and negatives are possible.
-
-**The authors do not endorse illegal activities.**
+LinIR is provided "AS IS". For authorized security assessments, incident response, and digital forensics only. Read-only operation. Output requires professional interpretation.
 
 ---
 
@@ -379,4 +206,4 @@ MIT License
 
 ## Contributing
 
-Issues and PRs welcome at https://github.com/dogadmin/LinIR
+https://github.com/dogadmin/LinIR
