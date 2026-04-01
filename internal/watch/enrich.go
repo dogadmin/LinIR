@@ -11,6 +11,7 @@ import (
 
 	"github.com/dogadmin/LinIR/internal/collector"
 	"github.com/dogadmin/LinIR/internal/model"
+	"github.com/dogadmin/LinIR/internal/score"
 	"github.com/dogadmin/LinIR/pkg/hashutil"
 )
 
@@ -203,66 +204,53 @@ func scoreEvent(evt *EnrichedEvent) {
 	}
 
 	// ===== 基础分 =====
-	add("ioc", "ioc_hit", "IOC 命中: "+evt.IOC.Value, 20, "medium")
+	add("ioc", score.RuleIOCHit, "IOC 命中: "+evt.IOC.Value, 20, "medium")
 
 	// ===== 进程/二进制域 =====
 	if evt.Process != nil {
 		for _, flag := range evt.Process.SuspiciousFlags {
 			switch flag {
 			case "exe_in_tmp":
-				add("process", "exe_in_tmp", "进程 exe 位于临时目录", 10, "low")
-				if isInterpreterNameWatch(evt.Process.Name) {
-					add("process", "exe_in_tmp_interpreter", "临时目录 shell/interpreter", 10, "medium")
+				add("process", score.RuleExeInTmp, "进程 exe 位于临时目录", 10, "low")
+				if score.IsInterpreterProcess(evt.Process.Name) {
+					add("process", score.RuleExeInTmpInterpreter, "临时目录 shell/interpreter", 10, "medium")
 				}
 			case "exe_deleted":
-				add("process", "exe_deleted", "进程 exe 已删除", 5, "low")
+				add("process", score.RuleExeDeleted, "进程 exe 已删除", 5, "low")
 			case "webserver_spawned_shell":
-				add("process", "webshell_strong", "Web 服务器派生 shell", 25, "high")
+				add("process", score.RuleWebshellStrong, "Web 服务器派生 shell", 25, "high")
 			}
 		}
 	} else if evt.Connection.PID > 0 {
-		// process_invisible 不高分，主要降 confidence
-		add("integrity", "process_invisible", "PID 存在但进程信息不可见", 5, "low")
+		add("integrity", score.RuleProcessInvisible, "PID 存在但进程信息不可见", 5, "low")
 	}
 
 	if evt.Binary != nil {
 		if evt.Binary.InTmpDir {
-			add("binary", "binary_in_tmp", "二进制位于临时目录", 10, "low")
+			add("binary", score.RuleBinaryInTmp, "二进制位于临时目录", 10, "low")
 		}
 		if !evt.Binary.Exists {
-			add("binary", "binary_missing", "二进制文件不存在", 5, "low")
+			add("binary", score.RuleBinaryMissing, "二进制文件不存在", 5, "low")
 		}
 	}
 
 	// ===== 持久化域 =====
 	if len(evt.Persistence) > 0 {
-		add("persistence", "persistence_linked", "进程关联到持久化项", 10, "medium")
-		// 检查持久化目标是否路径异常
+		add("persistence", score.RulePersistenceLinked, "进程关联到持久化项", 10, "medium")
 		for _, p := range evt.Persistence {
-			if isInTmpWatch(p.Target) {
-				add("persistence", "persistence_linked_abnormal", "持久化目标路径异常", 5, "high")
+			if score.IsInTmpDir(p.Target) {
+				add("persistence", score.RulePersistLinkedAbnorm, "持久化目标路径异常", 5, "high")
 				break
 			}
 		}
 	}
 
-	// ===== YARA 域（分 4 级）=====
+	// ===== YARA 域（共享 4 级分层）=====
 	for _, yh := range evt.YaraHits {
-		var score int
-		var sev string
-		switch yh.SeverityHint {
-		case "critical":
-			score, sev = 25, "critical"
-		case "high":
-			score, sev = 20, "high"
-		case "medium":
-			score, sev = 15, "medium"
-		default:
-			score, sev = 10, "low"
-		}
-		add("yara", "yara_hit_"+sev, "YARA 规则命中: "+yh.Rule, score, sev)
-		if isInTmpWatch(yh.TargetPath) {
-			add("yara", "yara_on_tmp_binary", "YARA 命中临时目录目标", 5, "high")
+		s, sev := score.YaraScoreByHint(yh.SeverityHint)
+		add("yara", "yara_hit_"+sev, "YARA 规则命中: "+yh.Rule, s, sev)
+		if score.IsInTmpDir(yh.TargetPath) {
+			add("yara", score.RuleYaraOnTmpBinary, "YARA 命中临时目录目标", 5, "high")
 		}
 	}
 
@@ -334,20 +322,4 @@ func scoreEvent(evt *EnrichedEvent) {
 		" confidence=" + evt.Confidence
 }
 
-func isInterpreterNameWatch(name string) bool {
-	for _, n := range []string{"bash", "sh", "zsh", "python", "python3", "perl", "ruby", "php", "node"} {
-		if name == n {
-			return true
-		}
-	}
-	return false
-}
-
-func isInTmpWatch(path string) bool {
-	for _, prefix := range []string{"/tmp/", "/var/tmp/", "/dev/shm/", "/private/tmp/"} {
-		if strings.HasPrefix(path, prefix) {
-			return true
-		}
-	}
-	return false
-}
+// isInterpreterNameWatch and isInTmpWatch moved to score.IsInterpreterProcess / score.IsInTmpDir

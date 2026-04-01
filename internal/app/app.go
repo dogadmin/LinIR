@@ -57,6 +57,7 @@ func (a *App) RunFull(ctx context.Context) error {
 		return err
 	}
 
+	a.result.Capabilities = detectCapabilities()
 	a.collectHost(ctx)
 	a.collectProcesses(ctx)
 	a.collectNetwork(ctx)

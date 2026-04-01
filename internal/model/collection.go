@@ -12,7 +12,8 @@ type CollectionResult struct {
 	CompletedAt  time.Time `json:"completed_at"`
 	DurationMS   int64     `json:"duration_ms"`
 
-	Host        HostInfo          `json:"host"`
+	Host         HostInfo          `json:"host"`
+	Capabilities *Capabilities    `json:"capabilities,omitempty"`
 	SelfCheck   SelfCheckResult   `json:"self_check"`
 	Preflight   PreflightResult   `json:"preflight"`
 	Processes   []ProcessInfo     `json:"processes,omitempty"`

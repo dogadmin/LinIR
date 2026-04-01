@@ -177,18 +177,24 @@ func scoreProcesses(sr *model.ScoreResult, procs []model.ProcessInfo, ctx *scori
 		for _, flag := range p.SuspiciousFlags {
 			switch flag {
 			case "exe_in_tmp":
-				add(sr, "process", "exe_in_tmp", fmt.Sprintf("PID %d (%s) 可执行文件位于临时目录", p.PID, p.Name), 10, "low", d)
-				if networked {
-					add(sr, "process", "exe_in_tmp_networked", fmt.Sprintf("PID %d (%s) 临时目录执行且联网", p.PID, p.Name), 10, "medium", d)
-				}
-				if isInterpreterName(p.Name) {
-					add(sr, "process", "exe_in_tmp_interpreter", fmt.Sprintf("PID %d (%s) 临时目录 shell/interpreter", p.PID, p.Name), 5, "medium", d)
+				action := checkProcessSuppress("exe_in_tmp", &p, ctx)
+				if action != ActionSuppress {
+					add(sr, "process", "exe_in_tmp", fmt.Sprintf("PID %d (%s) 可执行文件位于临时目录", p.PID, p.Name), applyScore(10, action), "low", d)
+					if networked {
+						add(sr, "process", "exe_in_tmp_networked", fmt.Sprintf("PID %d (%s) 临时目录执行且联网", p.PID, p.Name), applyScore(10, action), "medium", d)
+					}
+					if isInterpreterName(p.Name) {
+						add(sr, "process", "exe_in_tmp_interpreter", fmt.Sprintf("PID %d (%s) 临时目录 shell/interpreter", p.PID, p.Name), applyScore(5, action), "medium", d)
+					}
 				}
 
 			case "exe_deleted":
-				add(sr, "process", "exe_deleted", fmt.Sprintf("PID %d (%s) 可执行文件已删除", p.PID, p.Name), 5, "low", d)
-				if networked {
-					add(sr, "process", "exe_deleted_networked", fmt.Sprintf("PID %d (%s) 已删除且联网", p.PID, p.Name), 5, "medium", d)
+				action := checkProcessSuppress("exe_deleted", &p, ctx)
+				if action != ActionSuppress {
+					add(sr, "process", "exe_deleted", fmt.Sprintf("PID %d (%s) 可执行文件已删除", p.PID, p.Name), applyScore(5, action), "low", d)
+					if networked {
+						add(sr, "process", "exe_deleted_networked", fmt.Sprintf("PID %d (%s) 已删除且联网", p.PID, p.Name), applyScore(5, action), "medium", d)
+					}
 				}
 
 			case "webserver_spawned_shell":
@@ -282,9 +288,12 @@ func scorePersistence(sr *model.ScoreResult, items []model.PersistenceItem, ctx 
 				}
 
 			case "pipe_to_shell":
-				add(sr, "persistence", "pipe_shell", fmt.Sprintf("%s curl/wget 管道执行", item.Path), 8, "low", d)
-				if active {
-					add(sr, "persistence", "pipe_shell_active", fmt.Sprintf("%s 管道执行已激活", item.Path), 8, "medium", d)
+				pipeAction := checkPersistenceSuppress("pipe_to_shell", &item, ctx)
+				if pipeAction != ActionSuppress {
+					add(sr, "persistence", "pipe_shell", fmt.Sprintf("%s curl/wget 管道执行", item.Path), applyScore(8, pipeAction), "low", d)
+					if active {
+						add(sr, "persistence", "pipe_shell_active", fmt.Sprintf("%s 管道执行已激活", item.Path), applyScore(8, pipeAction), "medium", d)
+					}
 				}
 
 			case "ld_preload_export":
