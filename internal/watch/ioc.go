@@ -68,6 +68,29 @@ func LoadIOCFile(path string) (*IOCStore, error) {
 		// 跳过无法识别的行
 	}
 
+	// 域名 IOC 自动 DNS 解析 → 把解析出的 IP 也加入 IP 列表
+	// 这样连接中只有 IP 也能匹配到域名 IOC
+	for domain, ioc := range store.domains {
+		addrs, err := net.LookupHost(domain)
+		if err != nil {
+			fmt.Printf("[WARN] 域名 %s DNS 解析失败: %v\n", domain, err)
+			continue
+		}
+		for _, addr := range addrs {
+			if ip := net.ParseIP(addr); ip != nil {
+				normalized := ip.String()
+				if _, exists := store.ips[normalized]; !exists {
+					store.ips[normalized] = IOC{
+						Type:  "domain_resolved",
+						Value: domain, // 保留原始域名作为 IOC 值
+						Tags:  ioc.Tags,
+					}
+					fmt.Printf("[INFO] 域名 %s → %s\n", domain, normalized)
+				}
+			}
+		}
+	}
+
 	store.total = len(store.ips) + len(store.domains)
 	if store.total == 0 {
 		return nil, fmt.Errorf("IOC 文件 %s 中未找到有效 IOC", path)
