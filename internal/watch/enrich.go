@@ -74,28 +74,26 @@ func (c *ScanCache) FindProcess(pid int) *model.ProcessInfo {
 }
 
 // ResolveHitPID 为事件驱动命中（conntrack/BPF，PID=0）实时解析进程信息。
-// 做一次新鲜的 CollectConnections 并按连接元组匹配 PID。
 // 必须在 TriggerPolicy.Evaluate（去重）之前调用，否则后续轮询带 PID 的相同连接会被去重跳过。
+//
+// 策略：
+//  1. 快速路径：ResolveConnectionPID 定向查找（Linux: /proc/net/tcp 找 inode → 定向搜索 PID，~10-50ms）
+//  2. 慢速回退：CollectConnections 全量扫描匹配（~200-500ms，短命进程可能已退出）
 func ResolveHitPID(ctx context.Context, hit *HitEvent, collectors *collector.PlatformCollectors) {
 	if hit.Connection.PID > 0 {
 		return
 	}
+	// 快速路径：定向查找（不做全量 inode 扫描，找到即返回）
+	if pid, name := collectors.Network.ResolveConnectionPID(hit.Connection); pid > 0 {
+		hit.Connection.PID = pid
+		hit.Connection.ProcessName = name
+		return
+	}
+	// 慢速回退：全量采集后匹配
 	conns, err := collectors.Network.CollectConnections(ctx)
 	if err != nil {
 		return
 	}
-	// 精确匹配（含本地端口）
-	for _, c := range conns {
-		if c.PID > 0 && c.Proto == hit.Connection.Proto &&
-			c.RemoteAddress == hit.Connection.RemoteAddress &&
-			c.RemotePort == hit.Connection.RemotePort &&
-			c.LocalPort == hit.Connection.LocalPort {
-			hit.Connection.PID = c.PID
-			hit.Connection.ProcessName = c.ProcessName
-			return
-		}
-	}
-	// 宽松匹配（只匹配远端，处理端口复用等场景）
 	for _, c := range conns {
 		if c.PID > 0 && c.Proto == hit.Connection.Proto &&
 			c.RemoteAddress == hit.Connection.RemoteAddress &&

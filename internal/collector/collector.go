@@ -19,6 +19,9 @@ type ProcessCollector interface {
 // NetworkCollector enumerates network connections.
 type NetworkCollector interface {
 	CollectConnections(ctx context.Context) ([]model.ConnectionInfo, error)
+	// ResolveConnectionPID 快速定向解析单个连接的 PID（不做全量扫描）。
+	// 用于 conntrack/BPF 事件的即时 PID 解析，比 CollectConnections 快得多。
+	ResolveConnectionPID(conn model.ConnectionInfo) (pid int, processName string)
 }
 
 // PersistenceCollector enumerates persistence mechanisms.

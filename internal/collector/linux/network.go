@@ -188,6 +188,17 @@ func unixEntryToConn(e procfs.UnixSocketEntry, inodePID map[uint64]int) model.Co
 	return conn
 }
 
+// ResolveConnectionPID 快速定向解析单个连接的 PID。
+// 先在 /proc/net/tcp 中找到连接的 inode，再定向搜索 /proc/<pid>/fd/ 中持有该 inode 的进程。
+// 比全量 CollectConnections（MapInodeToPID 扫全部进程）快得多。
+func (c *NetworkCollector) ResolveConnectionPID(conn model.ConnectionInfo) (int, string) {
+	inode := procfs.FindInodeForTuple(conn.Proto, conn.RemoteAddress, conn.RemotePort, conn.LocalPort)
+	if inode == 0 {
+		return 0, ""
+	}
+	return procfs.FindPIDByInode(inode)
+}
+
 // buildPIDNameMap 从 /proc/<pid>/comm 读取进程名，仅读有 socket 的 PID
 func buildPIDNameMap(inodePID map[uint64]int) map[int]string {
 	pids := make(map[int]struct{}, len(inodePID))

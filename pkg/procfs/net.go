@@ -263,6 +263,79 @@ func ReadNetUnix() ([]UnixSocketEntry, error) {
 	return entries, scanner.Err()
 }
 
+// FindInodeForTuple 在 /proc/net/tcp 和 /proc/net/tcp6 中查找匹配连接元组的 inode。
+// 比全量 ReadNetTCP 更轻量，找到即返回。
+func FindInodeForTuple(proto, remoteAddr string, remotePort, localPort uint16) uint64 {
+	files := []struct {
+		path   string
+		isIPv6 bool
+	}{
+		{fmt.Sprintf("%s/net/tcp", ProcRoot), false},
+		{fmt.Sprintf("%s/net/tcp6", ProcRoot), true},
+	}
+	if proto == "udp" {
+		files = []struct {
+			path   string
+			isIPv6 bool
+		}{
+			{fmt.Sprintf("%s/net/udp", ProcRoot), false},
+			{fmt.Sprintf("%s/net/udp6", ProcRoot), true},
+		}
+	}
+
+	for _, nf := range files {
+		entries, err := readNetFile(nf.path, nf.isIPv6)
+		if err != nil {
+			continue
+		}
+		for _, e := range entries {
+			if e.RemotePort == remotePort && e.LocalPort == localPort {
+				ra := e.RemoteAddr.String()
+				if ra == remoteAddr {
+					return e.Inode
+				}
+			}
+		}
+	}
+	return 0
+}
+
+// FindPIDByInode 在 /proc/<pid>/fd/ 中定向搜索持有指定 inode 的进程。
+// 从高 PID 向低 PID 搜索（新进程优先），找到即返回。
+// 比全量 MapInodeToPID 快得多（只需找到一个匹配）。
+func FindPIDByInode(targetInode uint64) (pid int, processName string) {
+	pids, err := ListPIDs()
+	if err != nil {
+		return 0, ""
+	}
+	// 从高 PID 开始搜索（新创建的进程 PID 更大）
+	for i := len(pids) - 1; i >= 0; i-- {
+		p := pids[i]
+		fdDir := fmt.Sprintf("%s/%d/fd", ProcRoot, p)
+		entries, err := os.ReadDir(fdDir)
+		if err != nil {
+			continue
+		}
+		for _, entry := range entries {
+			target, err := os.Readlink(fmt.Sprintf("%s/%s", fdDir, entry.Name()))
+			if err != nil {
+				continue
+			}
+			if strings.HasPrefix(target, "socket:[") && strings.HasSuffix(target, "]") {
+				inodeStr := target[8 : len(target)-1]
+				if inode, err := strconv.ParseUint(inodeStr, 10, 64); err == nil && inode == targetInode {
+					name := ""
+					if data, err := os.ReadFile(fmt.Sprintf("%s/%d/comm", ProcRoot, p)); err == nil {
+						name = strings.TrimSpace(string(data))
+					}
+					return p, name
+				}
+			}
+		}
+	}
+	return 0, ""
+}
+
 // TCPStateName returns a human-readable name for a TCP state number.
 func TCPStateName(state uint8) string {
 	names := map[uint8]string{

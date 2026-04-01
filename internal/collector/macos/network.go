@@ -123,6 +123,24 @@ func (c *NetworkCollector) CollectConnections(ctx context.Context) ([]model.Conn
 	return conns, supplementErr
 }
 
+// ResolveConnectionPID macOS 上通过 proc_pidfdinfo 遍历查找匹配连接的 PID。
+func (c *NetworkCollector) ResolveConnectionPID(conn model.ConnectionInfo) (int, string) {
+	// macOS 上回退到全量采集后匹配（proc_pidfdinfo 无法按 inode 定向查找）
+	conns, err := c.CollectConnections(context.Background())
+	if err != nil {
+		return 0, ""
+	}
+	for _, cc := range conns {
+		if cc.PID > 0 && cc.Proto == conn.Proto &&
+			cc.RemoteAddress == conn.RemoteAddress &&
+			cc.RemotePort == conn.RemotePort &&
+			cc.LocalPort == conn.LocalPort {
+			return cc.PID, cc.ProcessName
+		}
+	}
+	return 0, ""
+}
+
 // connDedup 生成连接的去重 key（含 PID，避免多进程共享 socket 时丢数据）
 func connDedup(c *model.ConnectionInfo) string {
 	return fmt.Sprintf("%d:%s", c.PID, connTupleKey(c))
