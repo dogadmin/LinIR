@@ -284,6 +284,18 @@ func (s *Server) handleWatchStart(w http.ResponseWriter, r *http.Request) {
 		ticker := time.NewTicker(time.Duration(interval) * time.Second)
 		defer ticker.Stop()
 
+		handleHit := func(hit watch.HitEvent) {
+			decision := trigger.Evaluate(hit)
+			if !decision.ShouldEnrich {
+				return
+			}
+			cache := enricher.CollectCache(ctx)
+			evt := enricher.Enrich(ctx, hit, cache)
+			s.mu.Lock()
+			s.watchEvents = append(s.watchEvents, evt)
+			s.mu.Unlock()
+		}
+
 		scanOnce := func() {
 			conns, err := collectors.Network.CollectConnections(ctx)
 
@@ -301,29 +313,20 @@ func (s *Server) handleWatchStart(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 			hits := watch.MatchConnections(conns, iocStore)
-			if len(hits) == 0 {
-				return
-			}
-			cache := enricher.CollectCache(ctx)
 			for _, hit := range hits {
-				select {
-				case <-ctx.Done():
-					return
-				default:
-				}
-				decision := trigger.Evaluate(hit)
-				if !decision.ShouldEnrich {
-					continue
-				}
-				evt := enricher.Enrich(ctx, hit, cache)
-
-				s.mu.Lock()
-				s.watchEvents = append(s.watchEvents, evt)
-				s.mu.Unlock()
+				handleHit(hit)
 			}
 		}
 
-		scanOnce() // 立即执行一次
+		// 尝试 conntrack/BPF 事件驱动
+		var ctEvents <-chan watch.HitEvent
+		if watch.ConntrackAvailable() {
+			ctMonitor := watch.NewConntrackMonitor(iocStore)
+			go ctMonitor.Run(ctx)
+			ctEvents = ctMonitor.Events()
+		}
+
+		scanOnce() // 首次轮询
 
 		for {
 			select {
@@ -331,6 +334,8 @@ func (s *Server) handleWatchStart(w http.ResponseWriter, r *http.Request) {
 				return
 			case <-ticker.C:
 				scanOnce()
+			case hit := <-ctEvents:
+				handleHit(hit)
 			}
 		}
 	}()
@@ -403,7 +408,8 @@ func (s *Server) handleWatchStream(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Connection", "keep-alive")
 
 	lastIdx := 0
-	ticker := time.NewTicker(1 * time.Second) // 修复: 不用 time.After 避免 timer 泄漏
+	lastStatusKey := ""
+	ticker := time.NewTicker(1 * time.Second)
 	defer ticker.Stop()
 
 	for {
@@ -432,16 +438,20 @@ func (s *Server) handleWatchStream(w http.ResponseWriter, r *http.Request) {
 			}
 			lastIdx = newCount
 
-			// 发送扫描状态（named event，前端通过 addEventListener 接收）
-			statusJSON, _ := json.Marshal(map[string]interface{}{
-				"scans":      scanCount,
-				"last_conns": lastConns,
-				"last_err":   lastErr,
-				"events":     newCount,
-				"watching":   watching,
-			})
-			fmt.Fprintf(w, "event: status\ndata: %s\n\n", statusJSON)
-			flusher.Flush()
+			// 发送扫描状态（仅在状态变化时发送，避免刷屏）
+			statusKey := fmt.Sprintf("%d:%d:%d:%s", scanCount, lastConns, newCount, lastErr)
+			if statusKey != lastStatusKey {
+				lastStatusKey = statusKey
+				statusJSON, _ := json.Marshal(map[string]interface{}{
+					"scans":      scanCount,
+					"last_conns": lastConns,
+					"last_err":   lastErr,
+					"events":     newCount,
+					"watching":   watching,
+				})
+				fmt.Fprintf(w, "event: status\ndata: %s\n\n", statusJSON)
+				flusher.Flush()
+			}
 
 			if !watching && lastIdx >= newCount {
 				fmt.Fprintf(w, "event: done\ndata: {\"total\": %d}\n\n", newCount)

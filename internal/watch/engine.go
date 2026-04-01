@@ -89,14 +89,6 @@ func NewEngine(cfg WatchConfig, appCfg *config.Config) (*Engine, error) {
 
 // Run 启动监控主循环
 func (e *Engine) Run(ctx context.Context) error {
-	fmt.Printf("LinIR IOC 监控已启动 (间隔=%s", e.cfg.Interval)
-	if e.cfg.Duration > 0 {
-		fmt.Printf(", 时长=%s", e.cfg.Duration)
-	}
-	fmt.Println(")")
-	fmt.Println("按 Ctrl+C 停止监控")
-	fmt.Println()
-
 	// 设置超时
 	if e.cfg.Duration > 0 {
 		var cancel context.CancelFunc
@@ -104,22 +96,77 @@ func (e *Engine) Run(ctx context.Context) error {
 		defer cancel()
 	}
 
+	// 尝试 conntrack 事件驱动模式（Linux，需要 nf_conntrack 模块）
+	if ConntrackAvailable() {
+		return e.runConntrack(ctx)
+	}
+
+	// 降级到轮询模式
+	return e.runPolling(ctx)
+}
+
+// runConntrack 使用 conntrack 事件驱动监控（零遗漏，即使 RST 也能抓到）
+func (e *Engine) runConntrack(ctx context.Context) error {
+	fmt.Println("LinIR IOC 监控已启动 (模式=conntrack 事件驱动)")
+	fmt.Println("按 Ctrl+C 停止监控")
+	fmt.Println()
+
+	monitor := NewConntrackMonitor(e.iocStore)
+
+	// 后台启动 conntrack 监听
+	ctxMon, cancelMon := context.WithCancel(ctx)
+	defer cancelMon()
+
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- monitor.Run(ctxMon)
+	}()
+
+	// 同时保留轮询作为补充（捕获已有连接，conntrack 只报新连接）
 	ticker := time.NewTicker(e.cfg.Interval)
 	defer ticker.Stop()
 
-	// 立即执行第一次，并输出状态（不需要 verbose）
+	// 首次轮询
+	e.scan(ctx)
+	fmt.Printf("[INFO] 首次扫描完成 (conntrack 模式，轮询作为补充)\n")
+
+	for {
+		select {
+		case <-ctx.Done():
+			cancelMon()
+			return e.shutdown()
+		case err := <-errCh:
+			if err != nil {
+				fmt.Printf("[WARN] conntrack 断开: %v，切换到轮询模式\n", err)
+				return e.runPolling(ctx)
+			}
+			return e.shutdown()
+		case hit := <-monitor.Events():
+			e.handleHit(ctx, hit)
+		case <-ticker.C:
+			e.scan(ctx)
+		}
+	}
+}
+
+// runPolling 使用传统轮询模式
+func (e *Engine) runPolling(ctx context.Context) error {
+	fmt.Printf("LinIR IOC 监控已启动 (模式=轮询, 间隔=%s)\n", e.cfg.Interval)
+	fmt.Println("[INFO] 事件驱动不可用，使用轮询模式 (可能遗漏短暂连接)")
+	fmt.Println("[提示] Linux: modprobe nf_conntrack | macOS: 需要 root 权限")
+	fmt.Println("按 Ctrl+C 停止监控")
+	fmt.Println()
+
+	ticker := time.NewTicker(e.cfg.Interval)
+	defer ticker.Stop()
+
+	// 首次扫描状态输出
 	conns, err := e.collectors.Network.CollectConnections(ctx)
-	connCount := len(conns)
 	if err != nil {
 		fmt.Printf("[WARN] 连接采集错误: %v\n", err)
 	}
-	fmt.Printf("[INFO] 首次扫描: 采集到 %d 条连接", connCount)
-	if connCount > 0 {
-		hits := MatchConnections(conns, e.iocStore)
-		fmt.Printf(", %d 条 IOC 命中", len(hits))
-	}
-	fmt.Println()
-	if connCount == 0 {
+	fmt.Printf("[INFO] 首次扫描: 采集到 %d 条连接\n", len(conns))
+	if len(conns) == 0 {
 		fmt.Println("[WARN] 未采集到任何连接，请检查是否以 root/sudo 运行")
 	}
 	e.scan(ctx)
@@ -132,6 +179,27 @@ func (e *Engine) Run(ctx context.Context) error {
 			e.scan(ctx)
 		}
 	}
+}
+
+// handleHit 处理单个 conntrack 命中事件
+func (e *Engine) handleHit(ctx context.Context, hit HitEvent) {
+	decision := e.trigger.Evaluate(hit)
+	if !decision.ShouldEnrich {
+		return
+	}
+
+	cache := e.enricher.CollectCache(ctx)
+	evt := e.enricher.Enrich(ctx, hit, cache)
+
+	if e.yaraScanner != nil && evt.Process != nil && evt.Process.Exe != "" {
+		yaraHits, scanErr := e.yaraScanner.ScanFile(ctx, evt.Process.Exe)
+		if scanErr == nil && len(yaraHits) > 0 {
+			evt.YaraHits = yaraHits
+			scoreEvent(&evt)
+		}
+	}
+
+	e.writer.WriteEvent(evt)
 }
 
 // scan 执行一次扫描周期

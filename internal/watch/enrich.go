@@ -5,6 +5,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/google/uuid"
 
@@ -18,7 +19,12 @@ type Enricher struct {
 	collectors *collector.PlatformCollectors
 	preflight  *model.PreflightResult
 	selfCheck  *model.SelfCheckResult
+	// TTL 缓存：避免 conntrack/BPF 事件驱动模式下每个 hit 都全量采集
+	cachedScan *ScanCache
+	cacheTime  time.Time
 }
+
+const cacheTTL = 3 * time.Second
 
 // NewEnricher 创建补采器
 func NewEnricher(collectors *collector.PlatformCollectors, yaraRules string,
@@ -37,8 +43,11 @@ type ScanCache struct {
 	procMap     map[int]*model.ProcessInfo
 }
 
-// CollectCache 执行一次预采集，供当前扫描周期的所有命中事件共享
+// CollectCache 返回预采集缓存。3 秒内重复调用返回同一份缓存，避免事件驱动模式下重复采集。
 func (e *Enricher) CollectCache(ctx context.Context) *ScanCache {
+	if e.cachedScan != nil && time.Since(e.cacheTime) < cacheTTL {
+		return e.cachedScan
+	}
 	cache := &ScanCache{}
 	procs, err := e.collectors.Process.CollectProcesses(ctx)
 	if err == nil {
@@ -48,6 +57,8 @@ func (e *Enricher) CollectCache(ctx context.Context) *ScanCache {
 	if err == nil {
 		cache.Persistence = items
 	}
+	e.cachedScan = cache
+	e.cacheTime = time.Now()
 	return cache
 }
 

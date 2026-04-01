@@ -407,11 +407,17 @@ function startWatchStream() {
     } catch (_) {}
   };
 
+  let lastStatusKey = '';
   watchEventSource.addEventListener('status', function(e) {
     try {
       const st = JSON.parse(e.data);
-      let html = `<span class="badge badge-running">监控中</span> 扫描 #${st.scans} | 采集到 ${st.last_conns} 条连接 | ${st.events} 条命中`;
-      if (st.last_conns === 0) {
+      // 只在状态真正变化时更新 DOM，避免疯狂刷新
+      const key = `${st.scans}:${st.last_conns}:${st.events}:${st.last_err}`;
+      if (key === lastStatusKey) return;
+      lastStatusKey = key;
+
+      let html = `<span class="badge badge-running">监控中</span> 扫描 #${st.scans} | ${st.last_conns} 条连接 | ${st.events} 条命中`;
+      if (st.last_conns === 0 && st.scans > 0) {
         html += ' <span style="color:var(--red);font-weight:600">| 未采集到任何连接，请检查权限 (sudo)</span>';
       }
       if (st.last_err) {

@@ -278,15 +278,20 @@ func buildConnection(sock *pcbSocketInfo, inp *pcbInpcbInfo, tcpState int32, pro
 	var family string
 
 	if inp.vflag&0x1 != 0 {
-		// IPv4
 		localIP = inp.laddr4
 		remoteIP = inp.faddr4
 		family = "ipv4"
 	} else if inp.vflag&0x2 != 0 {
-		// IPv6
-		localIP = inp.laddr6
-		remoteIP = inp.faddr6
-		family = "ipv6"
+		// macOS 双栈：大量 IPv4 连接以 IPv4-mapped IPv6 (::ffff:x.x.x.x) 存储
+		if inp.faddr6.To4() != nil || inp.laddr6.To4() != nil {
+			localIP = inp.laddr4
+			remoteIP = inp.faddr4
+			family = "ipv4"
+		} else {
+			localIP = inp.laddr6
+			remoteIP = inp.faddr6
+			family = "ipv6"
+		}
 	} else {
 		return nil
 	}
