@@ -157,6 +157,7 @@
           <button id="btn-watch-start" class="btn btn-primary" onclick="startWatch()">开始监控</button>
           <button id="btn-watch-stop" class="btn btn-secondary" onclick="stopWatch()" disabled>停止监控</button>
           <label style="font-size:11px;color:var(--text2)">间隔<input type="number" id="watch-interval" value="3" min="1" max="60" style="width:40px;background:var(--bg);border:1px solid var(--border);color:var(--text);border-radius:4px;padding:2px 4px;margin-left:4px">秒</label>
+          <label style="font-size:11px;color:var(--text2)">接口<input type="text" id="watch-iface" placeholder="auto" style="width:60px;background:var(--bg);border:1px solid var(--border);color:var(--text);border-radius:4px;padding:2px 4px;margin-left:4px;font-size:11px" title="网络接口 (en0, eth0 等)，留空自动检测"></label>
         </div>
       </div>
       <div id="watch-status" style="margin-bottom:10px"></div>

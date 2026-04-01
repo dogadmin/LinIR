@@ -69,6 +69,7 @@ Whitelist file format: one entry per line with type prefix.
 	f.StringVar(&wcfg.WhitelistFile, "whitelist", "", "Whitelist file path")
 	f.IntVar(&wcfg.MaxEvents, "max-events", 0, "Max events per minute (0=unlimited)")
 	f.StringVar(&cfg.YaraRules, "yara-rules", "", "YARA rules file/directory for hit scanning")
+	f.StringVar(&wcfg.Interface, "iface", "", "Network interface for BPF capture (e.g. en0, eth0; empty=auto)")
 
 	cmd.MarkFlagRequired("iocs")
 

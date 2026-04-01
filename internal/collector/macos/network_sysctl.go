@@ -208,50 +208,128 @@ func parseSocketN(rec []byte) *pcbSocketInfo {
 	return info
 }
 
+// inpcbOffsets 定义 xinpcb_n 中各字段的偏移量。
+// 不同 macOS 版本的结构体布局可能不同。
+type inpcbOffsets struct {
+	fport int // inp_fport (u16, big-endian)
+	lport int // inp_lport (u16, big-endian)
+	vflag int // inp_vflag (u8)
+	faddr int // inp_dependfaddr union (16 bytes)
+	laddr int // inp_dependladdr union (16 bytes)
+	ipv4Off int // IPv4 地址在 union 内的偏移（in_addr_4in6 中 pad[3] 之后）
+}
+
+// 已知的偏移配置，按 macOS 版本从新到旧排列
+var knownInpcbOffsets = []inpcbOffsets{
+	// 配置 A: macOS 10.15-12 (标准布局)
+	{fport: 16, lport: 18, vflag: 48, faddr: 52, laddr: 68, ipv4Off: 12},
+	// 配置 B: 偏移漂移 +8 (某些 macOS 13+ 版本)
+	{fport: 24, lport: 26, vflag: 56, faddr: 60, laddr: 76, ipv4Off: 12},
+	// 配置 C: 偏移漂移 -8
+	{fport: 12, lport: 14, vflag: 44, faddr: 48, laddr: 64, ipv4Off: 12},
+}
+
+// 缓存探测到的正确偏移
+var detectedOffsets *inpcbOffsets
+
 // parseInpcbN 从 xinpcb_n 子记录中提取地址和端口。
-//
-// struct xinpcb_n {
-//   u32 xi_len;              // +0
-//   u32 xi_kind;             // +4  (XSO_INPCB)
-//   u64 xi_inpp;             // +8
-//   u16 inp_fport;           // +16 (foreign port, network byte order)
-//   u16 inp_lport;           // +18 (local port, network byte order)
-//   u64 inp_ppcb;            // +24 (aligned)
-//   u64 inp_gencnt;          // +32
-//   i32 inp_flags;           // +40
-//   u32 inp_flow;            // +44
-//   u8  inp_vflag;           // +48
-//   u8  inp_ip_ttl;          // +49
-//   u8  inp_ip_p;            // +50
-//   u8  pad;                 // +51
-//   // inp_dependfaddr union // +52: in_addr_4in6(16B) or in6_addr(16B)
-//   // inp_dependladdr union // +68: in_addr_4in6(16B) or in6_addr(16B)
-//   // in_addr_4in6 = { u32 pad[3]; struct in_addr addr; } → IPv4 at +12
-// };
+// 使用多偏移探测机制：尝试已知的偏移配置，通过 vflag 有效性校验选出正确的一组。
 func parseInpcbN(rec []byte) *pcbInpcbInfo {
-	if len(rec) < 84 { // 需要至少到 laddr 结束
+	if len(rec) < 40 {
+		return nil
+	}
+
+	// 如果已探测到正确偏移，直接使用
+	if detectedOffsets != nil {
+		return extractInpcb(rec, detectedOffsets)
+	}
+
+	// 尝试每组已知偏移
+	for i := range knownInpcbOffsets {
+		off := &knownInpcbOffsets[i]
+		if off.laddr+16 > len(rec) {
+			continue
+		}
+		vf := rec[off.vflag]
+		// vflag 有效值: 0x1(IPv4), 0x2(IPv6), 0x3(双栈)
+		if vf == 0x1 || vf == 0x2 || vf == 0x3 {
+			// 额外验证: 端口至少有一个非零
+			fport := binary.BigEndian.Uint16(rec[off.fport : off.fport+2])
+			lport := binary.BigEndian.Uint16(rec[off.lport : off.lport+2])
+			if fport > 0 || lport > 0 {
+				detectedOffsets = off
+				return extractInpcb(rec, off)
+			}
+		}
+	}
+
+	// 所有已知偏移都失败，暴力搜索 vflag 位置
+	// 在记录中搜索值为 0x1/0x2/0x3 的字节，前面 2+2 字节为有效端口
+	for vpos := 20; vpos+36 <= len(rec); vpos++ {
+		vf := rec[vpos]
+		if vf != 0x1 && vf != 0x2 && vf != 0x3 {
+			continue
+		}
+		// vflag 前面应该是: fport(-32), lport(-30), ... , vflag
+		// 但距离不确定。尝试常见的模式: vflag 前面有 flow(4)+flags(4)=8 字节,
+		// 再前面是 gencnt(8)+ppcb(8)=16 字节, 再前面是端口 (vflag - 32)
+		portOff := vpos - 32
+		if portOff < 8 || portOff+4 > len(rec) {
+			continue
+		}
+		fport := binary.BigEndian.Uint16(rec[portOff : portOff+2])
+		lport := binary.BigEndian.Uint16(rec[portOff+2 : portOff+4])
+		if (fport > 0 || lport > 0) && fport < 65535 && lport < 65535 {
+			addrOff := vpos + 4 // vflag(1)+ttl(1)+proto(1)+pad(1) = 4 bytes
+			if addrOff+32 <= len(rec) {
+				off := &inpcbOffsets{
+					fport:   portOff,
+					lport:   portOff + 2,
+					vflag:   vpos,
+					faddr:   addrOff,
+					laddr:   addrOff + 16,
+					ipv4Off: 12,
+				}
+				detectedOffsets = off
+				return extractInpcb(rec, off)
+			}
+		}
+	}
+
+	return nil
+}
+
+func extractInpcb(rec []byte, off *inpcbOffsets) *pcbInpcbInfo {
+	if off.laddr+16 > len(rec) {
 		return nil
 	}
 
 	info := &pcbInpcbInfo{}
+	info.fport = binary.BigEndian.Uint16(rec[off.fport : off.fport+2])
+	info.lport = binary.BigEndian.Uint16(rec[off.lport : off.lport+2])
+	info.vflag = rec[off.vflag]
 
-	// 端口: 网络字节序 (big-endian)
-	info.fport = binary.BigEndian.Uint16(rec[16:18])
-	info.lport = binary.BigEndian.Uint16(rec[18:20])
-
-	// vflag
-	info.vflag = rec[48]
-
-	// Foreign address union at +52
-	// in_addr_4in6: IPv4 地址在 union 内偏移 +12 (3个 u32 pad 之后)
-	info.faddr4 = net.IPv4(rec[52+12], rec[52+13], rec[52+14], rec[52+15])
+	// Foreign address
+	if off.faddr+off.ipv4Off+4 <= len(rec) {
+		info.faddr4 = net.IPv4(
+			rec[off.faddr+off.ipv4Off],
+			rec[off.faddr+off.ipv4Off+1],
+			rec[off.faddr+off.ipv4Off+2],
+			rec[off.faddr+off.ipv4Off+3])
+	}
 	info.faddr6 = make(net.IP, 16)
-	copy(info.faddr6, rec[52:68])
+	copy(info.faddr6, rec[off.faddr:off.faddr+16])
 
-	// Local address union at +68
-	info.laddr4 = net.IPv4(rec[68+12], rec[68+13], rec[68+14], rec[68+15])
+	// Local address
+	if off.laddr+off.ipv4Off+4 <= len(rec) {
+		info.laddr4 = net.IPv4(
+			rec[off.laddr+off.ipv4Off],
+			rec[off.laddr+off.ipv4Off+1],
+			rec[off.laddr+off.ipv4Off+2],
+			rec[off.laddr+off.ipv4Off+3])
+	}
 	info.laddr6 = make(net.IP, 16)
-	copy(info.laddr6, rec[68:84])
+	copy(info.laddr6, rec[off.laddr:off.laddr+16])
 
 	return info
 }

@@ -28,14 +28,16 @@ import (
 //
 // 需要 root/sudo 权限。
 type ConntrackMonitor struct {
-	iocStore *IOCStore
-	events   chan HitEvent
+	iocStore  *IOCStore
+	events    chan HitEvent
+	ifaceName string // 用户指定的接口名，空=自动检测
 }
 
-func NewConntrackMonitor(store *IOCStore) *ConntrackMonitor {
+func NewConntrackMonitor(store *IOCStore, iface string) *ConntrackMonitor {
 	return &ConntrackMonitor{
-		iocStore: store,
-		events:   make(chan HitEvent, 256),
+		iocStore:  store,
+		events:    make(chan HitEvent, 256),
+		ifaceName: iface,
 	}
 }
 
@@ -52,13 +54,18 @@ func (m *ConntrackMonitor) Run(ctx context.Context) error {
 	}
 	defer unix.Close(fd)
 
-	// 2. 获取主接口名
-	ifName, err := defaultInterface()
-	if err != nil {
-		return fmt.Errorf("获取默认网络接口: %w", err)
+	// 2. 获取接口名（用户指定或自动检测）
+	ifName := m.ifaceName
+	if ifName == "" {
+		var err2 error
+		ifName, err2 = defaultInterface()
+		if err2 != nil {
+			return fmt.Errorf("获取默认网络接口: %w", err2)
+		}
 	}
 
 	// 3. 绑定到接口
+	fmt.Printf("[INFO] BPF: 绑定接口 %s\n", ifName)
 	if err := bindBPF(fd, ifName); err != nil {
 		return fmt.Errorf("BPF 绑定 %s: %w", ifName, err)
 	}
@@ -268,6 +275,39 @@ func openBPF() (int, error) {
 }
 
 func defaultInterface() (string, error) {
+	// 方法 1: 通过默认路由确定出站接口（最可靠）
+	conn, err := net.Dial("udp", "8.8.8.8:80")
+	if err == nil {
+		defer conn.Close()
+		localAddr := conn.LocalAddr().(*net.UDPAddr)
+		// 根据本地 IP 反查接口名
+		ifaces, _ := net.Interfaces()
+		for _, iface := range ifaces {
+			addrs, _ := iface.Addrs()
+			for _, addr := range addrs {
+				var ip net.IP
+				switch v := addr.(type) {
+				case *net.IPNet:
+					ip = v.IP
+				case *net.IPAddr:
+					ip = v.IP
+				}
+				if ip != nil && ip.Equal(localAddr.IP) {
+					return iface.Name, nil
+				}
+			}
+		}
+	}
+
+	// 方法 2: 按优先级尝试常见的真实接口名
+	for _, name := range []string{"en0", "en1", "eth0", "eth1", "wlan0"} {
+		iface, err := net.InterfaceByName(name)
+		if err == nil && iface.Flags&net.FlagUp != 0 {
+			return name, nil
+		}
+	}
+
+	// 方法 3: 回退到第一个非虚拟的活跃接口
 	ifaces, err := net.Interfaces()
 	if err != nil {
 		return "", err
@@ -277,6 +317,18 @@ func defaultInterface() (string, error) {
 			continue
 		}
 		if iface.Flags&net.FlagUp == 0 {
+			continue
+		}
+		// 跳过已知的虚拟接口前缀
+		name := iface.Name
+		skip := false
+		for _, prefix := range []string{"utun", "awdl", "llw", "bridge", "gif", "stf", "ap"} {
+			if len(name) >= len(prefix) && name[:len(prefix)] == prefix {
+				skip = true
+				break
+			}
+		}
+		if skip {
 			continue
 		}
 		addrs, err := iface.Addrs()

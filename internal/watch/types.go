@@ -91,5 +91,6 @@ type WatchConfig struct {
 	DedupeWindow time.Duration // 去重时间窗口
 	MaxEvents    int           // 每分钟最大事件数（0=不限）
 	YaraRules    string        // YARA 规则路径（可选）
+	Interface    string        // 网络接口名（可选，空=自动检测）
 	Verbose      bool
 }

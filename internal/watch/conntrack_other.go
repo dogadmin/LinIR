@@ -9,7 +9,7 @@ type ConntrackMonitor struct {
 	events chan HitEvent
 }
 
-func NewConntrackMonitor(store *IOCStore) *ConntrackMonitor {
+func NewConntrackMonitor(store *IOCStore, iface string) *ConntrackMonitor {
 	return &ConntrackMonitor{events: make(chan HitEvent)}
 }
 

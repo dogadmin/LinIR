@@ -217,6 +217,7 @@ func (s *Server) handleWatchStart(w http.ResponseWriter, r *http.Request) {
 		IOCs      string `json:"iocs"`
 		Interval  int    `json:"interval"`
 		YaraRules string `json:"yara_rules"`
+		Interface string `json:"iface"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		rollback()
@@ -320,10 +321,15 @@ func (s *Server) handleWatchStart(w http.ResponseWriter, r *http.Request) {
 
 		// 尝试 conntrack/BPF 事件驱动
 		var ctEvents <-chan watch.HitEvent
+		var ctErrCh <-chan error
 		if watch.ConntrackAvailable() {
-			ctMonitor := watch.NewConntrackMonitor(iocStore)
-			go ctMonitor.Run(ctx)
+			ctMonitor := watch.NewConntrackMonitor(iocStore, body.Interface)
+			errCh := make(chan error, 1)
+			go func() {
+				errCh <- ctMonitor.Run(ctx)
+			}()
 			ctEvents = ctMonitor.Events()
+			ctErrCh = errCh
 		}
 
 		scanOnce() // 首次轮询
@@ -336,6 +342,15 @@ func (s *Server) handleWatchStart(w http.ResponseWriter, r *http.Request) {
 				scanOnce()
 			case hit := <-ctEvents:
 				handleHit(hit)
+			case err := <-ctErrCh:
+				// conntrack/BPF 失败，记录错误并继续轮询
+				if err != nil {
+					s.mu.Lock()
+					s.watchLastErr = "事件驱动失败: " + err.Error()
+					s.mu.Unlock()
+				}
+				ctEvents = nil // 停止从 channel 读取
+				ctErrCh = nil
 			}
 		}
 	}()

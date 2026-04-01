@@ -25,8 +25,8 @@ type ConntrackMonitor struct {
 	events   chan HitEvent
 }
 
-// NewConntrackMonitor 创建 conntrack 监控器
-func NewConntrackMonitor(store *IOCStore) *ConntrackMonitor {
+// NewConntrackMonitor 创建 conntrack 监控器（iface 参数在 Linux 上不使用，conntrack 监听所有接口）
+func NewConntrackMonitor(store *IOCStore, iface string) *ConntrackMonitor {
 	return &ConntrackMonitor{
 		iocStore: store,
 		events:   make(chan HitEvent, 256),

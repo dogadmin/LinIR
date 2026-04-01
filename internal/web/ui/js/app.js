@@ -360,6 +360,7 @@ async function startWatch() {
 
   const interval = parseInt(document.getElementById('watch-interval').value) || 3;
   const yaraRules = (document.getElementById('yara-rules-path').value || '').trim();
+  const iface = (document.getElementById('watch-iface').value || '').trim();
 
   document.getElementById('btn-watch-start').disabled = true;
   document.getElementById('btn-watch-stop').disabled = false;
@@ -370,7 +371,7 @@ async function startWatch() {
     const resp = await fetch('/api/watch/start', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ iocs: iocsText, interval: interval, yara_rules: yaraRules }),
+      body: JSON.stringify({ iocs: iocsText, interval: interval, yara_rules: yaraRules, iface: iface }),
     });
     if (!resp.ok) throw new Error(await resp.text());
     const result = await resp.json();

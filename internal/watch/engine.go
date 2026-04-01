@@ -107,11 +107,11 @@ func (e *Engine) Run(ctx context.Context) error {
 
 // runConntrack 使用 conntrack 事件驱动监控（零遗漏，即使 RST 也能抓到）
 func (e *Engine) runConntrack(ctx context.Context) error {
-	fmt.Println("LinIR IOC 监控已启动 (模式=conntrack 事件驱动)")
+	fmt.Println("LinIR IOC 监控已启动 (模式=事件驱动: Linux conntrack / macOS BPF)")
 	fmt.Println("按 Ctrl+C 停止监控")
 	fmt.Println()
 
-	monitor := NewConntrackMonitor(e.iocStore)
+	monitor := NewConntrackMonitor(e.iocStore, e.cfg.Interface)
 
 	// 后台启动 conntrack 监听
 	ctxMon, cancelMon := context.WithCancel(ctx)
