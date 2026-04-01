@@ -165,9 +165,11 @@ func (e *Engine) runConntrack(ctx context.Context) error {
 				time.Sleep(50 * time.Millisecond)
 			}
 			if hit.Connection.PID > 0 {
+				e.metrics.PIDResolvedImmediate.Add(1)
 				e.handleHit(ctx, hit)
 			} else {
 				pendingHits = append(pendingHits, hit)
+				e.metrics.PendingCurrent.Add(1)
 			}
 		case <-ticker.C:
 			// 用轮询数据解析 pending 的 PID=0 事件（完整 5 元组匹配）
@@ -184,9 +186,13 @@ func (e *Engine) runConntrack(ctx context.Context) error {
 					if c, ok := connIndex[ConnKey(ph.Connection)]; ok {
 						ph.Connection.PID = c.PID
 						ph.Connection.ProcessName = c.ProcessName
+						e.metrics.PIDResolvedDeferred.Add(1)
+						e.metrics.PendingCurrent.Add(-1)
 						e.handleHit(ctx, ph)
 					} else if time.Since(ph.Timestamp) >= 5*time.Second {
-						e.handleHit(ctx, ph) // 超时，PID=0 发出
+						e.metrics.PIDUnresolved.Add(1)
+						e.metrics.PendingCurrent.Add(-1)
+						e.handleHit(ctx, ph)
 					} else {
 						remaining = append(remaining, ph)
 					}
@@ -368,6 +374,12 @@ func CollectWithNfConntrack(ctx context.Context, collectors *collector.PlatformC
 func (e *Engine) handleHit(ctx context.Context, hit HitEvent) {
 	decision := e.trigger.Evaluate(hit)
 	if !decision.ShouldEnrich {
+		if decision.Deduped {
+			e.metrics.OutputDeduped.Add(1)
+		}
+		if decision.RateLimited {
+			e.metrics.OutputRateLimited.Add(1)
+		}
 		return
 	}
 
@@ -383,6 +395,7 @@ func (e *Engine) handleHit(ctx context.Context, hit HitEvent) {
 	}
 
 	e.writer.WriteEvent(evt)
+	e.metrics.OutputEmitted.Add(1)
 }
 
 // scan 执行一次扫描周期
@@ -412,6 +425,7 @@ func (e *Engine) scan(ctx context.Context) {
 
 	// 2. IOC 比对
 	hits := MatchConnections(conns, e.iocStore)
+	e.metrics.IOCMatchedTotal.Add(int64(len(hits)))
 	if e.cfg.Verbose {
 		fmt.Printf("[DEBUG] 周期 #%d: %d 条连接, %d 条 IOC 命中\n", e.scanCount, connCount, len(hits))
 	}
