@@ -49,7 +49,14 @@ When you land on a potentially compromised Linux or macOS host, you cannot trust
 - Container / namespace / chroot detection
 - Host trust level assessment (high / medium / low)
 
-### Process, Network, Persistence, Integrity, YARA, Scoring
+### Network Collection
+
+| Platform | Data Source | Details |
+|---|---|---|
+| Linux | `/proc/net/tcp`, `tcp6`, `udp`, `udp6`, `raw`, `raw6`, `unix` + `/proc/<pid>/fd/*` inode mapping | Protocol, address:port, state, PID via socket inode. IPv4-mapped IPv6 (`::ffff:x.x.x.x`) auto-normalized to IPv4 |
+| macOS | Dual-source merge: `proc_pidfdinfo` (PID association) + `sysctl pcblist_n` (global view, not restricted by SIP) | Protocol, address:port, TCP state, PID + process name. Sysctl-extracted PIDs validated against process list |
+
+### Process, Persistence, Integrity, YARA, Scoring
 
 See the [Chinese README](README.md) for detailed tables on data sources, collected fields, and risk flags per platform. The capabilities are identical regardless of language.
 
@@ -193,6 +200,18 @@ Continuously monitors network connections against an IOC list. On match, immedia
 
 **Core design: IOC hit is a trigger, not a verdict.** Context is recovered first, then scored.
 
+**Three-tier monitoring (automatically selects the best available):**
+
+| Tier | Linux | macOS | Characteristics |
+|---|---|---|---|
+| Tier 1 | conntrack (netlink event-driven) | BPF (/dev/bpf packet capture) | Zero-loss, captures at SYN phase, requires CAP_NET_ADMIN/root |
+| Tier 2 | /proc/net/nf_conntrack polling | — | RST entries retained ~10s, requires nf_conntrack module |
+| Tier 3 | /proc/net/tcp polling | proc_pidfdinfo + sysctl polling | Universal fallback, may miss short-lived connections |
+
+In event-driven mode (Tier 1), conntrack/BPF events trigger an immediate fresh `CollectConnections` to resolve the process PID, ensuring hit events include full process context.
+
+**Domain IOC support:** Domain IOCs are automatically DNS-resolved to IPs at load time and matched alongside IP IOCs.
+
 | Flag | Description | Default |
 |---|---|---|
 | `--iocs` | **Required.** IOC list file (one IP/domain per line, # for comments) | none |
@@ -204,6 +223,7 @@ Continuously monitors network connections against an IOC list. On match, immedia
 | `--whitelist` | Whitelist file (process:/path:/ioc: prefixes) | none |
 | `--max-events` | Max events per minute (0=unlimited) | `0` |
 | `--yara-rules` | YARA rules for scanning hit process executables | none |
+| `--interface` | Network interface name (BPF mode only, empty=auto-detect) | auto |
 
 ```bash
 sudo ./linir watch --iocs ./iocs.txt
@@ -211,21 +231,23 @@ sudo ./linir watch --iocs ./iocs.txt --duration 600 --interval 2 --json
 sudo ./linir watch --iocs ./iocs.txt --whitelist ./wl.txt --yara-rules ./rules/
 ```
 
-> Also available in the GUI dashboard ("IOC 监控" tab) with real-time SSE event streaming.
+> Also available in the GUI dashboard ("IOC Watch" tab) with real-time SSE event streaming.
 
 ---
 
 ### `linir gui` — Web GUI Dashboard
 
-Starts a local HTTP server and opens an interactive forensic dashboard in your default browser. All data stays local (127.0.0.1 only).
+Starts a local HTTP server and opens an interactive forensic dashboard in your default browser. Listens on 127.0.0.1 by default; use `--host` to allow external access.
 
 | Flag | Description | Default |
 |---|---|---|
+| `--host` | Listen address (`0.0.0.0` for external access) | `127.0.0.1` |
 | `--port` | HTTP server port | `18080` |
 
 ```bash
 sudo ./linir gui
-sudo ./linir gui --port 9090
+sudo ./linir gui --host 0.0.0.0              # Allow LAN access
+sudo ./linir gui --host 192.168.1.100 --port 9090
 ```
 
 **Dashboard features:**
@@ -235,6 +257,7 @@ sudo ./linir gui --port 9090
 - Evidence breakdown with per-rule scoring details
 - Integrity check results and preflight anomaly visualization
 - One-click collection trigger and JSON export from browser
+- IOC Watch tab with real-time SSE event streaming
 - Dark theme, responsive layout, embedded via `go:embed`
 
 > Works on macOS desktop, Linux with X11/Wayland, or remote via SSH port forwarding (`ssh -L 18080:127.0.0.1:18080 root@target`).
@@ -314,7 +337,7 @@ make build-all             # All platforms
 
 ## Known Limitations
 
-- **macOS network offsets**: Includes auto-probing for two known `vinfo_stat` sizes. If Apple changes the struct layout, connections are skipped with `confidence: low`.
+- **macOS network offsets**: `socket_fdinfo` and `xsocket_n` structs include multi-layout auto-probing. Sysctl-extracted PIDs are validated against the process list; unreliable values are automatically zeroed. If Apple changes the struct layout, connections may be skipped or marked `confidence: medium`.
 - **YARA subset**: Full PCRE, hex jumps, modules, `for` expressions, and imports are not supported. Unsupported features degrade gracefully.
 - **Hex `??` wildcard**: Simplified to `\x00` match. May cause false negatives.
 - **Non-root**: Significantly reduced visibility. Limited-access data marked `confidence: low`.
@@ -332,6 +355,7 @@ All pure Go. Fully statically compiled with `CGO_ENABLED=0`.
 | `github.com/google/uuid` | Collection ID |
 | `howett.net/plist` | macOS plist parsing |
 | `golang.org/x/sys` | syscall wrappers |
+| `github.com/ti-mo/conntrack` | Linux conntrack event-driven monitoring |
 
 ---
 
