@@ -358,22 +358,6 @@ func (e *Engine) scan(ctx context.Context) {
 		e.lastStatusAt = time.Now()
 	}
 
-	// DEBUG: 每次扫描都打印关键诊断信息
-	if e.cfg.Verbose && connCount > 0 {
-		// 打印前 3 个非 unix 连接的远端 IP，帮助排查格式匹配问题
-		samples := 0
-		for _, c := range conns {
-			if c.Proto == "unix" || c.RemoteAddress == "" {
-				continue
-			}
-			if samples < 3 {
-				fmt.Printf("[DEBUG] 连接样本: %s %s:%d → %s:%d (PID=%d)\n",
-					c.Proto, c.LocalAddress, c.LocalPort, c.RemoteAddress, c.RemotePort, c.PID)
-				samples++
-			}
-		}
-	}
-
 	if connCount == 0 {
 		if e.cfg.Verbose {
 			fmt.Printf("[WARN] 周期 #%d: 未采集到任何连接\n", e.scanCount)

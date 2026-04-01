@@ -415,7 +415,7 @@ function startWatchStream() {
     try {
       const st = JSON.parse(e.data);
       // 只在状态真正变化时更新 DOM，避免疯狂刷新
-      const key = `${st.scans}:${st.last_conns}:${st.events}:${st.last_err}`;
+      const key = `${st.scans}:${st.last_conns}:${st.events}:${st.last_hits}:${st.last_err}`;
       if (key === lastStatusKey) return;
       lastStatusKey = key;
 
@@ -426,9 +426,6 @@ function startWatchStream() {
       }
       if (st.last_err) {
         html += `<br><span style="color:var(--orange)">${esc(st.last_err)}</span>`;
-      }
-      if (st.samples && st.samples.length > 0) {
-        html += `<br><span style="font-size:11px;color:var(--text2)">连接样本: ${st.samples.map(s => '<code>' + esc(s) + '</code>').join(' ')}</span>`;
       }
       document.getElementById('watch-status').innerHTML = html;
     } catch (_) {}

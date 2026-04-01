@@ -203,6 +203,17 @@ func parseSocketN(rec []byte) *pcbSocketInfo {
 		if info.ePid < 0 || info.ePid > 1000000 {
 			info.ePid = 0
 		}
+		// 备用偏移：某些 macOS 版本 struct 对齐不同，PID 在 recLen-12 / recLen-8
+		if info.pid == 0 && info.ePid == 0 && recLen >= 84 {
+			altPid := int32(binary.LittleEndian.Uint32(rec[recLen-12:]))
+			altEPid := int32(binary.LittleEndian.Uint32(rec[recLen-8:]))
+			if altPid > 0 && altPid <= 1000000 {
+				info.pid = altPid
+			}
+			if altEPid > 0 && altEPid <= 1000000 {
+				info.ePid = altEPid
+			}
+		}
 	}
 
 	return info

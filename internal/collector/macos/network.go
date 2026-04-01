@@ -33,6 +33,15 @@ func (c *NetworkCollector) CollectConnections(ctx context.Context) ([]model.Conn
 		return nil, fmt.Errorf("sysctl kern.proc.all: %w", err)
 	}
 
+	// 构建 PID → 进程名 映射，供 sysctl 连接补全 ProcessName
+	pidNameMap := make(map[int]string, len(kinfos))
+	for _, kp := range kinfos {
+		pid := int(kp.Proc.P_pid)
+		if pid > 0 {
+			pidNameMap[pid] = byteSliceToString(kp.Proc.P_comm[:])
+		}
+	}
+
 	// 2. 主路线：proc_pidfdinfo（有 PID 关联）
 	var conns []model.ConnectionInfo
 	seen := make(map[string]struct{})
@@ -80,6 +89,15 @@ func (c *NetworkCollector) CollectConnections(ctx context.Context) ([]model.Conn
 	sysctlConns, fbErr := collectSysctlConnections(ctx)
 	if fbErr == nil && len(sysctlConns) > 0 {
 		conns = mergeConnections(conns, sysctlConns, seenTuples)
+	}
+
+	// 为 sysctl 连接补全 ProcessName（sysctl 可能提取到 PID 但没有进程名）
+	for i := range conns {
+		if conns[i].PID > 0 && conns[i].ProcessName == "" {
+			if name, ok := pidNameMap[conns[i].PID]; ok {
+				conns[i].ProcessName = name
+			}
+		}
 	}
 
 	// 如果 proc 采到 0 条但 sysctl 有数据，标记降级

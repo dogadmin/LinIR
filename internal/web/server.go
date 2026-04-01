@@ -46,7 +46,6 @@ type Server struct {
 	watchLastConns   int
 	watchLastErr     string
 	watchLastMode    string
-	watchLastSamples []string
 	watchLastHits    int
 }
 
@@ -334,20 +333,6 @@ func (s *Server) handleWatchStart(w http.ResponseWriter, r *http.Request) {
 				conns, scanErr = collectors.Network.CollectConnections(ctx)
 			}
 
-			// 采集连接样本用于前端诊断
-			var samples []string
-			count := 0
-			for _, c := range conns {
-				if c.Proto == "unix" || c.RemoteAddress == "" {
-					continue
-				}
-				if count < 3 {
-					samples = append(samples, fmt.Sprintf("%s %s:%d→%s:%d",
-						c.Proto, c.LocalAddress, c.LocalPort, c.RemoteAddress, c.RemotePort))
-					count++
-				}
-			}
-
 			hitCount := 0
 			if len(conns) > 0 {
 				hits := watch.MatchConnections(conns, iocStore)
@@ -361,7 +346,6 @@ func (s *Server) handleWatchStart(w http.ResponseWriter, r *http.Request) {
 			s.watchScanCount++
 			s.watchLastConns = len(conns)
 			s.watchLastMode = monitorMode
-			s.watchLastSamples = samples
 			s.watchLastHits = hitCount
 			if scanErr != nil {
 				s.watchLastErr = scanErr.Error()
@@ -494,7 +478,6 @@ func (s *Server) handleWatchStream(w http.ResponseWriter, r *http.Request) {
 			lastConns := s.watchLastConns
 			lastErr := s.watchLastErr
 			mode := s.watchLastMode
-			samples := s.watchLastSamples
 			lastHits := s.watchLastHits
 			s.mu.Unlock()
 
@@ -518,7 +501,6 @@ func (s *Server) handleWatchStream(w http.ResponseWriter, r *http.Request) {
 					"events":     newCount,
 					"watching":   watching,
 					"mode":       mode,
-					"samples":    samples,
 				})
 				fmt.Fprintf(w, "event: status\ndata: %s\n\n", statusJSON)
 				flusher.Flush()
