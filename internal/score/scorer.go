@@ -122,15 +122,6 @@ func hasFlag(flags []string, target string) bool {
 	return false
 }
 
-func hasFlagPrefix(flags []string, prefix string) bool {
-	for _, f := range flags {
-		if strings.HasPrefix(f, prefix) {
-			return true
-		}
-	}
-	return false
-}
-
 func isInTmp(path string) bool {
 	for _, prefix := range []string{"/tmp/", "/var/tmp/", "/dev/shm/", "/private/tmp/"} {
 		if strings.HasPrefix(path, prefix) {
