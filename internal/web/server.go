@@ -33,6 +33,7 @@ var uiFS embed.FS
 // Server 是 LinIR 的 Web GUI 服务器
 type Server struct {
 	cfg        *config.Config
+	host       string
 	port       int
 	result     *model.CollectionResult
 	mu         sync.Mutex
@@ -49,8 +50,8 @@ type Server struct {
 	watchLastHits    int
 }
 
-func NewServer(cfg *config.Config, port int) *Server {
-	return &Server{cfg: cfg, port: port}
+func NewServer(cfg *config.Config, host string, port int) *Server {
+	return &Server{cfg: cfg, host: host, port: port}
 }
 
 func (s *Server) Start() error {
@@ -77,7 +78,7 @@ func (s *Server) Start() error {
 	mux.HandleFunc("/api/fs/browse", s.handleFsBrowse)
 	mux.HandleFunc("/api/yara/scan", s.handleYaraScan)
 
-	addr := fmt.Sprintf("127.0.0.1:%d", s.port)
+	addr := fmt.Sprintf("%s:%d", s.host, s.port)
 	listener, err := net.Listen("tcp", addr)
 	if err != nil {
 		return fmt.Errorf("监听 %s 失败: %w", addr, err)

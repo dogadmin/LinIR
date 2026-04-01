@@ -62,8 +62,8 @@ LinIR 是一个单二进制、零依赖的取证分诊工具，专为**已失陷
 
 | 平台 | 数据源 | 采集内容 |
 |---|---|---|
-| Linux | `/proc/net/tcp`、`tcp6`、`udp`、`udp6`、`raw`、`raw6`、`unix` + `/proc/<pid>/fd/*` inode 映射 | 协议、本地/远端地址:端口、状态、通过 socket inode 关联 PID |
-| macOS | `PROC_PIDLISTFDS` + `PROC_PIDFDSOCKETINFO`（syscall 336）| 协议、本地/远端地址:端口、TCP 状态、直接 PID 关联 |
+| Linux | `/proc/net/tcp`、`tcp6`、`udp`、`udp6`、`raw`、`raw6`、`unix` + `/proc/<pid>/fd/*` inode 映射 | 协议、本地/远端地址:端口、状态、通过 socket inode 关联 PID。IPv4-mapped IPv6 (`::ffff:x.x.x.x`) 自动归一化为 IPv4 |
+| macOS | 双源合并：`proc_pidfdinfo`（PID 关联）+ `sysctl pcblist_n`（全局视图，不受 SIP 限制）| 协议、本地/远端地址:端口、TCP 状态、PID + 进程名。sysctl 提取的 PID 经进程列表校验，垃圾数据自动清零 |
 
 ### 持久化采集
 
@@ -330,6 +330,18 @@ sudo ./linir bundle --output-dir /tmp/evidence
 
 **核心设计：IOC 命中不是结论，而是触发器。** 命中后拉取运行态上下文，组合评分，再判断风险级别。
 
+**三层监控模式（自动选择最优层）：**
+
+| 层级 | Linux | macOS | 特点 |
+|---|---|---|---|
+| 层 1 | conntrack（netlink 事件驱动） | BPF（/dev/bpf 抓包） | 零遗漏，SYN 阶段即捕获，需 CAP_NET_ADMIN/root |
+| 层 2 | /proc/net/nf_conntrack 轮询 | — | RST 连接保留 ~10s，需 nf_conntrack 模块 |
+| 层 3 | /proc/net/tcp 轮询 | proc_pidfdinfo + sysctl 轮询 | 通用回退，可能遗漏短暂连接 |
+
+事件驱动模式（层 1）中，conntrack/BPF 事件到达后立即做新鲜的 `CollectConnections` 解析进程 PID，确保命中事件包含完整的进程上下文。
+
+**域名 IOC 支持：** 域名 IOC 在加载时自动 DNS 解析为 IP，解析后的 IP 与原始 IP IOC 统一匹配，无需额外配置。
+
 | 参数 | 说明 | 默认值 |
 |---|---|---|
 | `--iocs` | **必填**。IOC 列表文件路径（每行一个 IP 或域名，# 为注释） | 无 |
@@ -341,6 +353,7 @@ sudo ./linir bundle --output-dir /tmp/evidence
 | `--whitelist` | 白名单文件路径 | 无 |
 | `--max-events` | 每分钟最大事件数（0=不限） | `0` |
 | `--yara-rules` | YARA 规则路径，命中后扫描进程 exe | 无 |
+| `--interface` | 网络接口名（仅 BPF 模式，空=自动检测） | 自动 |
 
 ```bash
 # 基础监控
@@ -385,7 +398,7 @@ ioc:8.8.8.8
 
 每个事件输出：IOC、连接详情、进程上下文、二进制哈希、持久化关联、YARA 命中、完整性状态、评分、严重度、可信度、证据列表。
 
-**去重机制：** 同一 IOC + 同一 PID + 同一连接在 60 秒窗口内只报一次。
+**去重机制：** 同一 IOC + 同一远端地址:端口在 60 秒窗口内只报一次，支持频率限制（`--max-events`）和白名单过滤。
 
 > watch 模式也集成在 GUI 仪表盘中（"IOC 监控"选项卡），支持在浏览器中输入 IOC 列表、实时查看命中事件流。
 
@@ -393,18 +406,22 @@ ioc:8.8.8.8
 
 ### `linir gui` — Web 可视化仪表盘
 
-启动本地 HTTP 服务器，在浏览器中打开交互式取证仪表盘。所有数据仅在本机（127.0.0.1），不暴露到网络。
+启动本地 HTTP 服务器，在浏览器中打开交互式取证仪表盘。默认仅监听 127.0.0.1，可通过 `--host` 参数开放外部访问。
 
 | 参数 | 说明 | 默认值 |
 |---|---|---|
+| `--host` | 监听地址（`0.0.0.0` 允许外部访问） | `127.0.0.1` |
 | `--port` | HTTP 服务器端口 | `18080` |
 
 ```bash
-# 启动仪表盘
+# 启动仪表盘（默认仅本机访问）
 sudo ./linir gui
 
-# 自定义端口
-sudo ./linir gui --port 9090
+# 允许局域网访问
+sudo ./linir gui --host 0.0.0.0
+
+# 指定 IP 和端口
+sudo ./linir gui --host 192.168.1.100 --port 9090
 ```
 
 启动后自动打开默认浏览器（macOS 用 `open`，Linux 用 `xdg-open`）。如果无法自动打开，手动访问 `http://127.0.0.1:18080`。
@@ -460,11 +477,14 @@ sudo ./linir collect \
   --output-dir /evidence/$(hostname)-$(date +%Y%m%d)
 ```
 
-### 场景三：macOS 桌面可视化分析
+### 场景三：可视化仪表盘
 
 ```bash
-# 在 macOS 上直接打开可视化仪表盘
+# 在本机打开可视化仪表盘
 sudo ./linir gui
+
+# 允许局域网其他设备访问仪表盘
+sudo ./linir gui --host 0.0.0.0
 
 # 或通过 SSH 转发在远程 Linux 上使用
 ssh -L 18080:127.0.0.1:18080 root@target
@@ -629,19 +649,20 @@ linir collect
 
 linir watch --iocs ./iocs.txt
     │
-    ├── 加载 IOC 列表       IP + Domain 自动识别
-    ├── 主循环（每 N 秒）
-    │     ├── 连接快照       复用 network collector
-    │     ├── IOC 比对       IP 直匹配
-    │     ├── 去重/频控      窗口 + rate limit + 白名单
-    │     └── 命中 → 补采    进程 + 二进制 + 持久化 + YARA + 完整性
-    └── 输出                彩色文本 / JSONL / 事件 bundle
+    ├── 加载 IOC 列表       IP + Domain（自动 DNS 解析为 IP）
+    ├── 三层监控（自动选择）
+    │     ├── 层1 conntrack/BPF   事件驱动，零遗漏
+    │     ├── 层2 nf_conntrack    轮询，RST 保留 10s
+    │     └── 层3 /proc/net/tcp   通用回退
+    ├── 事件驱动命中 → ResolveHitPID（实时采集 PID）→ 去重/频控
+    ├── 轮询命中（已含 PID）→ 去重/频控
+    └── 命中 → 补采（进程+二进制+持久化+YARA+完整性）→ 评分 → 输出
 
-linir gui
+linir gui [--host 0.0.0.0] [--port 18080]
     │
-    ├── HTTP 服务器        127.0.0.1:18080，go:embed 内嵌资源
+    ├── HTTP 服务器        默认 127.0.0.1，--host 可开放外部访问
     ├── /api/collect       POST 触发采集，返回 JSON
-    ├── /api/watch/*       IOC 监控（启动/停止/SSE 事件流）
+    ├── /api/watch/*       IOC 监控（启动/停止/SSE 实时事件流）
     └── 浏览器仪表盘       暗色主题，响应式，交互式表格 + IOC 监控
 ```
 
@@ -649,7 +670,7 @@ linir gui
 
 ## 已知限制
 
-- **macOS 网络偏移**：`socket_fdinfo` 结构体字段偏移包含两种已知 `vinfo_stat` 大小的自动探测。如果 Apple 在未来版本中更改结构体布局，自动探测可能失败（连接将被跳过并标记 `confidence: low`）。
+- **macOS 网络偏移**：`socket_fdinfo` 和 `xsocket_n` 结构体字段偏移包含多种已知布局的自动探测。sysctl 提取的 PID 经进程列表校验，不可靠的值自动清零。如果 Apple 在未来版本中更改结构体布局，自动探测可能失败（连接将被跳过或标记 `confidence: medium`）。
 - **YARA 子集**：不支持完整 PCRE 正则、hex 跳跃通配符（`[4-6]`）、模块（pe, elf, math）、`for` 表达式和规则导入。不支持的特性会优雅降级而非崩溃。
 - **Hex 通配符 `??`**：当前简化为 `\x00` 匹配，可能导致漏报。
 - **非 root 执行**：非 root 运行会显著降低可见性。受限数据标记为 `confidence: low`。
@@ -665,6 +686,7 @@ linir gui
 | `github.com/google/uuid` | 采集 ID 生成 | 否 |
 | `howett.net/plist` | macOS plist 解析 | 否 |
 | `golang.org/x/sys` | syscall 封装 | 否 |
+| `github.com/ti-mo/conntrack` | Linux conntrack 事件驱动监控 | 否 |
 
 所有依赖均为纯 Go。通过 `CGO_ENABLED=0` 完全静态编译。
 
