@@ -136,20 +136,7 @@ func (m *ConntrackMonitor) handleEvent(ev ct.Event) {
 	}
 }
 
-// emit 非阻塞发送命中事件，满则丢弃并计数
-func (m *ConntrackMonitor) emit(hit HitEvent) {
-	if m.metrics != nil {
-		m.metrics.RawEventsTotal.Add(1)
-		m.metrics.IOCMatchedTotal.Add(1)
-	}
-	select {
-	case m.events <- hit:
-	default:
-		if m.metrics != nil {
-			m.metrics.EventChannelOverflow.Add(1)
-		}
-	}
-}
+func (m *ConntrackMonitor) emit(hit HitEvent) { emitHit(m.events, hit, m.metrics) }
 
 func addrFamily(ip netip.Addr) string {
 	if ip.Is4() || ip.Is4In6() {

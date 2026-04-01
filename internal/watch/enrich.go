@@ -91,6 +91,10 @@ func (e *Enricher) Enrich(ctx context.Context, hit HitEvent, cache *ScanCache) E
 	resolveState := "unresolved"
 	if hit.Connection.PID > 0 {
 		resolveState = "immediate"
+		// 事件驱动来源（conntrack/BPF）的 PID 都是事后解析的
+		if hit.SourceStage == "conntrack_new" || hit.SourceStage == "bpf_syn" || hit.SourceStage == "bpf_udp" {
+			resolveState = "deferred"
+		}
 	}
 
 	evt := EnrichedEvent{
@@ -102,7 +106,7 @@ func (e *Enricher) Enrich(ctx context.Context, hit HitEvent, cache *ScanCache) E
 		Confidence:      "high",
 		SourceStage:     hit.SourceStage,
 		PIDResolveState: resolveState,
-		DedupeKey:       hit.IOC.Value + ":" + ConnKey(hit.Connection),
+		DedupeKey:       dedupeKey(hit),
 	}
 
 	// 1. 进程上下文——从缓存 O(1) 查找

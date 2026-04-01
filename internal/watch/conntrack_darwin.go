@@ -270,19 +270,7 @@ func (m *ConntrackMonitor) matchAndEmitProto(srcIP, dstIP net.IP, srcPort, dstPo
 	}
 }
 
-// emit 非阻塞发送命中事件
-func (m *ConntrackMonitor) emit(hit HitEvent) {
-	if m.metrics != nil {
-		m.metrics.RawEventsTotal.Add(1)
-		m.metrics.IOCMatchedTotal.Add(1)
-	}
-	select {
-	case m.events <- hit:
-	default:
-		if m.metrics != nil {
-			m.metrics.EventChannelOverflow.Add(1)
-		}
-	}
+func (m *ConntrackMonitor) emit(hit HitEvent) { emitHit(m.events, hit, m.metrics) }
 }
 
 // ========== BPF 底层操作 ==========

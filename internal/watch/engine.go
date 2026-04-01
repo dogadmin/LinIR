@@ -156,15 +156,7 @@ func (e *Engine) runConntrack(ctx context.Context) error {
 			}
 			return e.shutdown()
 		case hit := <-monitor.Events():
-			// 多次重试 targeted 查找，趁 socket FD 还在 /proc/<pid>/fd/ 中
-			for attempt := 0; attempt < 4; attempt++ {
-				ResolveHitPID(ctx, &hit, e.collectors)
-				if hit.Connection.PID > 0 {
-					break
-				}
-				time.Sleep(50 * time.Millisecond)
-			}
-			if hit.Connection.PID > 0 {
+			if ResolveHitPIDWithRetry(ctx, &hit, e.collectors) {
 				e.metrics.PIDResolvedImmediate.Add(1)
 				e.handleHit(ctx, hit)
 			} else {
@@ -172,32 +164,20 @@ func (e *Engine) runConntrack(ctx context.Context) error {
 				e.metrics.PendingCurrent.Add(1)
 			}
 		case <-ticker.C:
-			// 用轮询数据解析 pending 的 PID=0 事件（完整 5 元组匹配）
 			if len(pendingHits) > 0 {
 				conns, _ := e.collectors.Network.CollectConnections(ctx)
-				connIndex := make(map[string]*model.ConnectionInfo, len(conns))
-				for i := range conns {
-					if conns[i].PID > 0 {
-						connIndex[ConnKey(conns[i])] = &conns[i]
-					}
-				}
-				var remaining []HitEvent
-				for _, ph := range pendingHits {
-					if c, ok := connIndex[ConnKey(ph.Connection)]; ok {
-						ph.Connection.PID = c.PID
-						ph.Connection.ProcessName = c.ProcessName
+				pendingHits = ResolvePendingHits(pendingHits, conns,
+					func(ph HitEvent) {
 						e.metrics.PIDResolvedDeferred.Add(1)
 						e.metrics.PendingCurrent.Add(-1)
 						e.handleHit(ctx, ph)
-					} else if time.Since(ph.Timestamp) >= 5*time.Second {
+					},
+					func(ph HitEvent) {
 						e.metrics.PIDUnresolved.Add(1)
 						e.metrics.PendingCurrent.Add(-1)
 						e.handleHit(ctx, ph)
-					} else {
-						remaining = append(remaining, ph)
-					}
-				}
-				pendingHits = remaining
+					},
+				)
 			}
 			e.scan(ctx)
 		}
@@ -320,10 +300,6 @@ func (e *Engine) scanNfConntrack(ctx context.Context, isFirst bool) {
 	}
 }
 
-func connKeyForMerge(c model.ConnectionInfo) string {
-	return fmt.Sprintf("%s:%s:%d:%s:%d", c.Proto, c.LocalAddress, c.LocalPort, c.RemoteAddress, c.RemotePort)
-}
-
 // mergeNfAndTcp 合并 nf_conntrack 和 /proc/net/tcp 的连接。
 // nf_conntrack 提供完整性（RST 条目保留 10s），/proc/net/tcp 提供 PID。
 type connProcInfo struct {
@@ -335,7 +311,7 @@ func mergeNfAndTcp(nfConns, tcpConns []model.ConnectionInfo) []model.ConnectionI
 	pidMap := make(map[string]connProcInfo, len(tcpConns))
 	for _, c := range tcpConns {
 		if c.PID > 0 {
-			pidMap[connKeyForMerge(c)] = connProcInfo{PID: c.PID, ProcessName: c.ProcessName}
+			pidMap[ConnKey(c)] = connProcInfo{PID: c.PID, ProcessName: c.ProcessName}
 		}
 	}
 
@@ -343,7 +319,7 @@ func mergeNfAndTcp(nfConns, tcpConns []model.ConnectionInfo) []model.ConnectionI
 	var merged []model.ConnectionInfo
 
 	for i := range nfConns {
-		key := connKeyForMerge(nfConns[i])
+		key := ConnKey(nfConns[i])
 		seen[key] = struct{}{}
 		if info, ok := pidMap[key]; ok {
 			nfConns[i].PID = info.PID
@@ -356,7 +332,7 @@ func mergeNfAndTcp(nfConns, tcpConns []model.ConnectionInfo) []model.ConnectionI
 		if rc.Proto == "unix" {
 			continue
 		}
-		if _, exists := seen[connKeyForMerge(rc)]; !exists {
+		if _, exists := seen[ConnKey(rc)]; !exists {
 			merged = append(merged, rc)
 		}
 	}

@@ -352,26 +352,7 @@ func (s *Server) handleWatchStart(w http.ResponseWriter, r *http.Request) {
 				conns, scanErr = collectors.Network.CollectConnections(ctx)
 			}
 
-			// 用本次轮询的连接数据解析 pending 的 PID=0 事件（完整 5 元组匹配）
-			connIndex := make(map[string]*model.ConnectionInfo, len(conns))
-			for i := range conns {
-				if conns[i].PID > 0 {
-					connIndex[watch.ConnKey(conns[i])] = &conns[i]
-				}
-			}
-			var remaining []watch.HitEvent
-			for _, ph := range pendingHits {
-				if c, ok := connIndex[watch.ConnKey(ph.Connection)]; ok {
-					ph.Connection.PID = c.PID
-					ph.Connection.ProcessName = c.ProcessName
-					handleHit(ph)
-				} else if time.Since(ph.Timestamp) >= 5*time.Second {
-					handleHit(ph)
-				} else {
-					remaining = append(remaining, ph)
-				}
-			}
-			pendingHits = remaining
+			pendingHits = watch.ResolvePendingHits(pendingHits, conns, handleHit, handleHit)
 
 			hitCount := 0
 			if len(conns) > 0 {
@@ -404,15 +385,7 @@ func (s *Server) handleWatchStart(w http.ResponseWriter, r *http.Request) {
 			case <-ticker.C:
 				scanOnce()
 			case hit := <-ctEvents:
-				// 多次重试 targeted 查找，趁 socket FD 还在 /proc/<pid>/fd/ 中
-				for attempt := 0; attempt < 4; attempt++ {
-					watch.ResolveHitPID(ctx, &hit, collectors)
-					if hit.Connection.PID > 0 {
-						break
-					}
-					time.Sleep(50 * time.Millisecond)
-				}
-				if hit.Connection.PID > 0 {
+				if watch.ResolveHitPIDWithRetry(ctx, &hit, collectors) {
 					handleHit(hit)
 				} else {
 					pendingHits = append(pendingHits, hit)
