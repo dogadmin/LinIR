@@ -42,9 +42,12 @@ type Server struct {
 	watchCancel    context.CancelFunc
 	watching       bool
 	watchEvents    []watch.EnrichedEvent
-	watchScanCount int
-	watchLastConns int
-	watchLastErr   string
+	watchScanCount   int
+	watchLastConns   int
+	watchLastErr     string
+	watchLastMode    string
+	watchLastSamples []string
+	watchLastHits    int
 }
 
 func NewServer(cfg *config.Config, port int) *Server {
@@ -273,6 +276,14 @@ func (s *Server) handleWatchStart(w http.ResponseWriter, r *http.Request) {
 	s.watchEvents = nil
 	s.mu.Unlock()
 
+	// 确定监控模式（在 goroutine 之前，供响应使用）
+	monitorMode := "轮询"
+	if watch.ConntrackAvailable() {
+		monitorMode = "事件驱动"
+	} else if watch.NfConntrackAvailable() {
+		monitorMode = "nf_conntrack"
+	}
+
 	// 后台运行监控循环
 	go func() {
 		defer func() {
@@ -297,32 +308,11 @@ func (s *Server) handleWatchStart(w http.ResponseWriter, r *http.Request) {
 			s.mu.Unlock()
 		}
 
-		scanOnce := func() {
-			conns, err := collectors.Network.CollectConnections(ctx)
-
-			s.mu.Lock()
-			s.watchScanCount++
-			s.watchLastConns = len(conns)
-			if err != nil {
-				s.watchLastErr = err.Error()
-			} else {
-				s.watchLastErr = ""
-			}
-			s.mu.Unlock()
-
-			if len(conns) == 0 {
-				return
-			}
-			hits := watch.MatchConnections(conns, iocStore)
-			for _, hit := range hits {
-				handleHit(hit)
-			}
-		}
-
-		// 尝试 conntrack/BPF 事件驱动
+		useNfConntrack := monitorMode == "nf_conntrack"
 		var ctEvents <-chan watch.HitEvent
 		var ctErrCh <-chan error
-		if watch.ConntrackAvailable() {
+
+		if monitorMode == "事件驱动" {
 			ctMonitor := watch.NewConntrackMonitor(iocStore, body.Interface)
 			errCh := make(chan error, 1)
 			go func() {
@@ -330,6 +320,55 @@ func (s *Server) handleWatchStart(w http.ResponseWriter, r *http.Request) {
 			}()
 			ctEvents = ctMonitor.Events()
 			ctErrCh = errCh
+		}
+
+		scanOnce := func() {
+			var conns []model.ConnectionInfo
+			var scanErr error
+
+			if useNfConntrack {
+				// 层 2: 读 nf_conntrack + /proc/net/tcp 合并
+				conns, scanErr = watch.CollectWithNfConntrack(ctx, collectors)
+			} else {
+				// 层 3: 仅 /proc/net/tcp
+				conns, scanErr = collectors.Network.CollectConnections(ctx)
+			}
+
+			// 采集连接样本用于前端诊断
+			var samples []string
+			count := 0
+			for _, c := range conns {
+				if c.Proto == "unix" || c.RemoteAddress == "" {
+					continue
+				}
+				if count < 3 {
+					samples = append(samples, fmt.Sprintf("%s %s:%d→%s:%d",
+						c.Proto, c.LocalAddress, c.LocalPort, c.RemoteAddress, c.RemotePort))
+					count++
+				}
+			}
+
+			hitCount := 0
+			if len(conns) > 0 {
+				hits := watch.MatchConnections(conns, iocStore)
+				hitCount = len(hits)
+				for _, hit := range hits {
+					handleHit(hit)
+				}
+			}
+
+			s.mu.Lock()
+			s.watchScanCount++
+			s.watchLastConns = len(conns)
+			s.watchLastMode = monitorMode
+			s.watchLastSamples = samples
+			s.watchLastHits = hitCount
+			if scanErr != nil {
+				s.watchLastErr = scanErr.Error()
+			} else {
+				s.watchLastErr = ""
+			}
+			s.mu.Unlock()
 		}
 
 		scanOnce() // 首次轮询
@@ -355,11 +394,22 @@ func (s *Server) handleWatchStart(w http.ResponseWriter, r *http.Request) {
 		}
 	}()
 
+	// 收集已加载的 IOC 列表（前 10 条，供前端诊断显示）
+	var iocSamples []string
+	for k := range iocStore.ListIPs() {
+		if len(iocSamples) >= 10 {
+			break
+		}
+		iocSamples = append(iocSamples, k)
+	}
+
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]interface{}{
-		"status":    "started",
-		"ioc_count": iocStore.Total(),
-		"interval":  interval,
+		"status":      "started",
+		"ioc_count":   iocStore.Total(),
+		"ioc_samples": iocSamples,
+		"interval":    interval,
+		"mode":        monitorMode,
 	})
 }
 
@@ -443,6 +493,9 @@ func (s *Server) handleWatchStream(w http.ResponseWriter, r *http.Request) {
 			scanCount := s.watchScanCount
 			lastConns := s.watchLastConns
 			lastErr := s.watchLastErr
+			mode := s.watchLastMode
+			samples := s.watchLastSamples
+			lastHits := s.watchLastHits
 			s.mu.Unlock()
 
 			// 发送新事件
@@ -454,15 +507,18 @@ func (s *Server) handleWatchStream(w http.ResponseWriter, r *http.Request) {
 			lastIdx = newCount
 
 			// 发送扫描状态（仅在状态变化时发送，避免刷屏）
-			statusKey := fmt.Sprintf("%d:%d:%d:%s", scanCount, lastConns, newCount, lastErr)
+			statusKey := fmt.Sprintf("%d:%d:%d:%d:%s", scanCount, lastConns, newCount, lastHits, lastErr)
 			if statusKey != lastStatusKey {
 				lastStatusKey = statusKey
 				statusJSON, _ := json.Marshal(map[string]interface{}{
 					"scans":      scanCount,
 					"last_conns": lastConns,
 					"last_err":   lastErr,
+					"last_hits":  lastHits,
 					"events":     newCount,
 					"watching":   watching,
+					"mode":       mode,
+					"samples":    samples,
 				})
 				fmt.Fprintf(w, "event: status\ndata: %s\n\n", statusJSON)
 				flusher.Flush()

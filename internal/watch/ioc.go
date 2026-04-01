@@ -113,6 +113,21 @@ func (s *IOCStore) DomainCount() int {
 	return len(s.domains)
 }
 
+// ListIPs 返回所有 IP IOC 的 map（只读访问）
+func (s *IOCStore) ListIPs() map[string]IOC {
+	return s.ips
+}
+
+// DumpIOCs 打印所有已加载的 IOC（调试用）
+func (s *IOCStore) DumpIOCs() {
+	for k := range s.ips {
+		fmt.Printf("[DEBUG] IOC IP: %q\n", k)
+	}
+	for k := range s.domains {
+		fmt.Printf("[DEBUG] IOC 域名: %q\n", k)
+	}
+}
+
 // isValidDomain 简单校验是否为合法域名
 func isValidDomain(s string) bool {
 	if len(s) < 3 || !strings.Contains(s, ".") {

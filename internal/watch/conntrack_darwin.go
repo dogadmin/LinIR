@@ -451,6 +451,16 @@ func installSYNFilter(fd int) error {
 	return nil
 }
 
+// NfConntrackAvailable 在 macOS 上不可用
+func NfConntrackAvailable() bool {
+	return false
+}
+
+// ReadNfConntrackConns 在 macOS 上不可用
+func ReadNfConntrackConns() ([]model.ConnectionInfo, error) {
+	return nil, nil
+}
+
 // ConntrackAvailable 在 macOS 上检查 BPF 是否可用（即是否有 root 权限）
 func ConntrackAvailable() bool {
 	fd, err := openBPF()

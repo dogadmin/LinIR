@@ -375,8 +375,10 @@ async function startWatch() {
     });
     if (!resp.ok) throw new Error(await resp.text());
     const result = await resp.json();
+    const iocList = (result.ioc_samples || []).map(s => '<code>' + esc(s) + '</code>').join(' ');
     document.getElementById('watch-status').innerHTML =
-      `<span class="badge badge-running">监控中</span> 已加载 ${result.ioc_count} 条 IOC，间隔 ${result.interval} 秒`;
+      `<span class="badge badge-running">监控中 [${esc(result.mode || '轮询')}]</span> ${result.ioc_count} 条 IOC，间隔 ${result.interval} 秒` +
+      (iocList ? `<br><span style="font-size:11px;color:var(--text2)">IOC: ${iocList}</span>` : '');
 
     // 开启 SSE 事件流
     startWatchStream();
@@ -417,12 +419,16 @@ function startWatchStream() {
       if (key === lastStatusKey) return;
       lastStatusKey = key;
 
-      let html = `<span class="badge badge-running">监控中</span> 扫描 #${st.scans} | ${st.last_conns} 条连接 | ${st.events} 条命中`;
+      const modeLabel = st.mode ? ` [${esc(st.mode)}]` : '';
+      let html = `<span class="badge badge-running">监控中${modeLabel}</span> 扫描 #${st.scans} | ${st.last_conns} 条连接 | 本轮匹配 ${st.last_hits || 0} | 累计命中 ${st.events}`;
       if (st.last_conns === 0 && st.scans > 0) {
-        html += ' <span style="color:var(--red);font-weight:600">| 未采集到任何连接，请检查权限 (sudo)</span>';
+        html += '<br><span style="color:var(--red);font-weight:600">未采集到任何连接，请检查权限 (sudo)</span>';
       }
       if (st.last_err) {
-        html += ` <span style="color:var(--orange)">[${esc(st.last_err)}]</span>`;
+        html += `<br><span style="color:var(--orange)">${esc(st.last_err)}</span>`;
+      }
+      if (st.samples && st.samples.length > 0) {
+        html += `<br><span style="font-size:11px;color:var(--text2)">连接样本: ${st.samples.map(s => '<code>' + esc(s) + '</code>').join(' ')}</span>`;
       }
       document.getElementById('watch-status').innerHTML = html;
     } catch (_) {}

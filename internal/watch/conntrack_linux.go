@@ -12,6 +12,7 @@ import (
 	"github.com/ti-mo/netfilter"
 
 	"github.com/dogadmin/LinIR/internal/model"
+	"github.com/dogadmin/LinIR/pkg/procfs"
 )
 
 // ConntrackMonitor 通过 Linux conntrack 事件实时监控网络连接。
@@ -138,12 +139,48 @@ func addrFamily(ip netip.Addr) string {
 	return "ipv6"
 }
 
-// ConntrackAvailable 检查 conntrack 是否可用
+// ConntrackAvailable 检查 conntrack 事件驱动是否可用（需要 CAP_NET_ADMIN + nf_conntrack 模块）
 func ConntrackAvailable() bool {
 	conn, err := ct.Dial(nil)
 	if err != nil {
 		return false
 	}
-	conn.Close()
-	return true
+	defer conn.Close()
+
+	// Dial 成功不代表 Listen 也能成功，必须完整测试
+	evCh := make(chan ct.Event, 1)
+	_, err = conn.Listen(evCh, 1, []netfilter.NetlinkGroup{netfilter.GroupCTNew})
+	return err == nil
+}
+
+// NfConntrackAvailable 检查 /proc/net/nf_conntrack 文件是否可读
+func NfConntrackAvailable() bool {
+	return procfs.NfConntrackAvailable()
+}
+
+// ReadNfConntrackConns 读取 /proc/net/nf_conntrack 并转为 ConnectionInfo 列表
+func ReadNfConntrackConns() ([]model.ConnectionInfo, error) {
+	entries, err := procfs.ReadNfConntrack()
+	if err != nil {
+		return nil, err
+	}
+	var conns []model.ConnectionInfo
+	for _, e := range entries {
+		family := "ipv4"
+		if e.L3Proto == "ipv6" {
+			family = "ipv6"
+		}
+		conns = append(conns, model.ConnectionInfo{
+			Proto:         e.L4Proto,
+			Family:        family,
+			LocalAddress:  e.SrcAddr.String(),
+			LocalPort:     e.SrcPort,
+			RemoteAddress: e.DstAddr.String(),
+			RemotePort:    e.DstPort,
+			State:         e.State,
+			Source:        "nf_conntrack",
+			Confidence:    "high",
+		})
+	}
+	return conns, nil
 }
