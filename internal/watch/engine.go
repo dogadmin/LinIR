@@ -152,6 +152,7 @@ func (e *Engine) runConntrack(ctx context.Context) error {
 			}
 			return e.shutdown()
 		case hit := <-monitor.Events():
+			ResolveHitPID(ctx, &hit, e.collectors)
 			e.handleHit(ctx, hit)
 		case <-ticker.C:
 			e.scan(ctx)

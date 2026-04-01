@@ -91,11 +91,16 @@ func (c *NetworkCollector) CollectConnections(ctx context.Context) ([]model.Conn
 		conns = mergeConnections(conns, sysctlConns, seenTuples)
 	}
 
-	// 为 sysctl 连接补全 ProcessName（sysctl 可能提取到 PID 但没有进程名）
+	// 为 sysctl 连接补全/校验 ProcessName
 	for i := range conns {
 		if conns[i].PID > 0 && conns[i].ProcessName == "" {
 			if name, ok := pidNameMap[conns[i].PID]; ok {
 				conns[i].ProcessName = name
+			} else if conns[i].Source == "sysctl_pcblist_n" {
+				// sysctl PID 提取不可靠（struct 偏移因 macOS 版本而异），
+				// 提取到的 PID 不在进程列表中说明是垃圾数据，清零
+				conns[i].PID = 0
+				conns[i].Confidence = "medium"
 			}
 		}
 	}

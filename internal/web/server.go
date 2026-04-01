@@ -364,6 +364,7 @@ func (s *Server) handleWatchStart(w http.ResponseWriter, r *http.Request) {
 			case <-ticker.C:
 				scanOnce()
 			case hit := <-ctEvents:
+				watch.ResolveHitPID(ctx, &hit, collectors)
 				handleHit(hit)
 			case err := <-ctErrCh:
 				// conntrack/BPF 失败，记录错误并继续轮询

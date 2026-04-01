@@ -2,7 +2,6 @@ package watch
 
 import (
 	"context"
-	"fmt"
 	"os"
 	"strconv"
 	"strings"
@@ -41,9 +40,7 @@ func NewEnricher(collectors *collector.PlatformCollectors, yaraRules string,
 type ScanCache struct {
 	Processes   []model.ProcessInfo
 	Persistence []model.PersistenceItem
-	Connections []model.ConnectionInfo
 	procMap     map[int]*model.ProcessInfo
-	connPIDMap  map[string]int // 连接元组 → PID 反查
 }
 
 // CollectCache 返回预采集缓存。3 秒内重复调用返回同一份缓存，避免事件驱动模式下重复采集。
@@ -59,11 +56,6 @@ func (e *Enricher) CollectCache(ctx context.Context) *ScanCache {
 	items, err := e.collectors.Persistence.CollectPersistence(ctx)
 	if err == nil {
 		cache.Persistence = items
-	}
-	// 采集当前连接，用于 PID=0 时的反查
-	conns, err := e.collectors.Network.CollectConnections(ctx)
-	if err == nil {
-		cache.Connections = conns
 	}
 	e.cachedScan = cache
 	e.cacheTime = time.Now()
@@ -81,35 +73,38 @@ func (c *ScanCache) FindProcess(pid int) *model.ProcessInfo {
 	return c.procMap[pid]
 }
 
-// FindPIDByConnection 通过连接元组反查 PID（延迟构建索引）。
-// 用于 conntrack/BPF 事件 PID=0 时，从轮询连接数据中找到对应的 PID。
-func (c *ScanCache) FindPIDByConnection(conn model.ConnectionInfo) int {
-	if c.connPIDMap == nil {
-		c.connPIDMap = make(map[string]int, len(c.Connections))
-		for _, cc := range c.Connections {
-			if cc.PID > 0 && cc.Proto != "unix" {
-				// 精确 key: proto:remoteIP:remotePort:localPort
-				key := fmt.Sprintf("%s:%s:%d:%d", cc.Proto, cc.RemoteAddress, cc.RemotePort, cc.LocalPort)
-				c.connPIDMap[key] = cc.PID
-				// 宽松 key: proto:remoteIP:remotePort（不同本地端口也能匹配）
-				key2 := fmt.Sprintf("%s:%s:%d", cc.Proto, cc.RemoteAddress, cc.RemotePort)
-				if _, exists := c.connPIDMap[key2]; !exists {
-					c.connPIDMap[key2] = cc.PID
-				}
-			}
+// ResolveHitPID 为事件驱动命中（conntrack/BPF，PID=0）实时解析进程信息。
+// 做一次新鲜的 CollectConnections 并按连接元组匹配 PID。
+// 必须在 TriggerPolicy.Evaluate（去重）之前调用，否则后续轮询带 PID 的相同连接会被去重跳过。
+func ResolveHitPID(ctx context.Context, hit *HitEvent, collectors *collector.PlatformCollectors) {
+	if hit.Connection.PID > 0 {
+		return
+	}
+	conns, err := collectors.Network.CollectConnections(ctx)
+	if err != nil {
+		return
+	}
+	// 精确匹配（含本地端口）
+	for _, c := range conns {
+		if c.PID > 0 && c.Proto == hit.Connection.Proto &&
+			c.RemoteAddress == hit.Connection.RemoteAddress &&
+			c.RemotePort == hit.Connection.RemotePort &&
+			c.LocalPort == hit.Connection.LocalPort {
+			hit.Connection.PID = c.PID
+			hit.Connection.ProcessName = c.ProcessName
+			return
 		}
 	}
-	// 先精确匹配
-	key := fmt.Sprintf("%s:%s:%d:%d", conn.Proto, conn.RemoteAddress, conn.RemotePort, conn.LocalPort)
-	if pid, ok := c.connPIDMap[key]; ok {
-		return pid
+	// 宽松匹配（只匹配远端，处理端口复用等场景）
+	for _, c := range conns {
+		if c.PID > 0 && c.Proto == hit.Connection.Proto &&
+			c.RemoteAddress == hit.Connection.RemoteAddress &&
+			c.RemotePort == hit.Connection.RemotePort {
+			hit.Connection.PID = c.PID
+			hit.Connection.ProcessName = c.ProcessName
+			return
+		}
 	}
-	// 再宽松匹配
-	key2 := fmt.Sprintf("%s:%s:%d", conn.Proto, conn.RemoteAddress, conn.RemotePort)
-	if pid, ok := c.connPIDMap[key2]; ok {
-		return pid
-	}
-	return 0
 }
 
 // Enrich 对命中事件进行上下文补采和评分
@@ -124,20 +119,15 @@ func (e *Enricher) Enrich(ctx context.Context, hit HitEvent, cache *ScanCache) E
 	}
 
 	// 1. 进程上下文——从缓存 O(1) 查找
+	// PID 应在调用 Enrich 前已由 ResolveHitPID 解析（事件驱动模式）
+	// 或在 CollectConnections 中已设置（轮询模式）
 	if hit.Connection.PID > 0 && cache != nil {
 		evt.Process = cache.FindProcess(hit.Connection.PID)
 	}
-	// PID=0 时从轮询连接数据反查 PID（conntrack/BPF 事件无 PID）
-	if hit.Connection.PID == 0 && cache != nil {
-		if resolvedPID := cache.FindPIDByConnection(hit.Connection); resolvedPID > 0 {
-			evt.Connection.PID = resolvedPID
-			evt.Process = cache.FindProcess(resolvedPID)
-		}
-	}
-	if evt.Process == nil && evt.Connection.PID > 0 {
+	if evt.Process == nil && hit.Connection.PID > 0 {
 		evt.Confidence = "medium"
 	}
-	if evt.Connection.PID == 0 {
+	if hit.Connection.PID == 0 {
 		evt.Confidence = "medium"
 	}
 
