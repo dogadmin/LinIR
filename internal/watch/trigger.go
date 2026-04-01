@@ -73,9 +73,11 @@ func (tp *TriggerPolicy) Evaluate(hit HitEvent) TriggerDecision {
 	}
 
 	// 通过所有检查——允许触发
-	// PID=0 的事件不进去重窗口，给轮询路径第二次机会解析 PID
 	if hit.Connection.PID > 0 {
 		tp.seen[key] = time.Now()
+	} else {
+		// PID=0 用短窗口（5 秒）防刷屏，但不阻塞后续带 PID 的事件
+		tp.seen[key] = time.Now().Add(-(tp.dedupeWindow - 5*time.Second))
 	}
 	tp.minuteCount++
 
