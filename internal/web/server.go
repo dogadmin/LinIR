@@ -522,6 +522,10 @@ func (s *Server) handleWatchStream(w http.ResponseWriter, r *http.Request) {
 
 // handleCwd 返回服务器当前工作目录
 func (s *Server) handleCwd(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "需要 GET", http.StatusMethodNotAllowed)
+		return
+	}
 	cwd, err := os.Getwd()
 	if err != nil {
 		cwd = "/"
