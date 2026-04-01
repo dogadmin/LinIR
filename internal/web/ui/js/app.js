@@ -449,7 +449,7 @@ function appendWatchEvent(evt) {
   const tr = document.createElement('tr');
   if (evt.severity === 'critical' || evt.severity === 'high') tr.className = 'suspicious';
 
-  const proc = evt.process ? evt.process.name : '—';
+  const proc = evt.process ? evt.process.name : (evt.connection?.process_name || '—');
   const remote = evt.connection ? `${evt.connection.remote_address}:${evt.connection.remote_port}` : '—';
   const time = evt.timestamp ? new Date(evt.timestamp).toLocaleTimeString() : '—';
   const evidenceHtml = (evt.evidence || []).map(e =>

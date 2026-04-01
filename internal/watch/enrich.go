@@ -124,6 +124,13 @@ func (e *Enricher) Enrich(ctx context.Context, hit HitEvent, cache *ScanCache) E
 	if hit.Connection.PID > 0 && cache != nil {
 		evt.Process = cache.FindProcess(hit.Connection.PID)
 	}
+	// 回退：进程已退出但连接上记录了进程名（来自 /proc/<pid>/comm 或 proc_pidfdinfo）
+	if evt.Process == nil && hit.Connection.PID > 0 && hit.Connection.ProcessName != "" {
+		evt.Process = &model.ProcessInfo{
+			PID:  hit.Connection.PID,
+			Name: hit.Connection.ProcessName,
+		}
+	}
 	if evt.Process == nil && hit.Connection.PID > 0 {
 		evt.Confidence = "medium"
 	}
