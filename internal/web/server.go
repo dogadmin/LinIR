@@ -305,13 +305,14 @@ func (s *Server) handleWatchStart(w http.ResponseWriter, r *http.Request) {
 			cache := enricher.CollectCache(ctx)
 			evt := enricher.Enrich(ctx, hit, cache)
 			s.mu.Lock()
-			// 如果有 PID，检查是否能替换之前的 PID=0 事件
+			// 如果有 PID，用完整5元组检查是否能替换之前的 PID=0 事件
 			replaced := false
 			if evt.Connection.PID > 0 {
+				evtKey := watch.ConnKey(evt.Connection)
 				for i := range s.watchEvents {
 					if s.watchEvents[i].Connection.PID == 0 &&
 						s.watchEvents[i].IOC.Value == evt.IOC.Value &&
-						s.watchEvents[i].Connection.RemoteAddress == evt.Connection.RemoteAddress {
+						watch.ConnKey(s.watchEvents[i].Connection) == evtKey {
 						s.watchEvents[i] = evt
 						replaced = true
 						break
@@ -332,7 +333,7 @@ func (s *Server) handleWatchStart(w http.ResponseWriter, r *http.Request) {
 		var ctErrCh <-chan error
 
 		if monitorMode == "事件驱动" {
-			ctMonitor := watch.NewConntrackMonitor(iocStore, body.Interface)
+			ctMonitor := watch.NewConntrackMonitor(iocStore, body.Interface, nil)
 			errCh := make(chan error, 1)
 			go func() {
 				errCh <- ctMonitor.Run(ctx)
@@ -351,27 +352,23 @@ func (s *Server) handleWatchStart(w http.ResponseWriter, r *http.Request) {
 				conns, scanErr = collectors.Network.CollectConnections(ctx)
 			}
 
-			// 用本次轮询的连接数据解析 pending 的 PID=0 事件
+			// 用本次轮询的连接数据解析 pending 的 PID=0 事件（完整 5 元组匹配）
+			connIndex := make(map[string]*model.ConnectionInfo, len(conns))
+			for i := range conns {
+				if conns[i].PID > 0 {
+					connIndex[watch.ConnKey(conns[i])] = &conns[i]
+				}
+			}
 			var remaining []watch.HitEvent
 			for _, ph := range pendingHits {
-				resolved := false
-				for _, c := range conns {
-					if c.PID > 0 && c.Proto == ph.Connection.Proto &&
-						c.RemoteAddress == ph.Connection.RemoteAddress &&
-						c.RemotePort == ph.Connection.RemotePort {
-						ph.Connection.PID = c.PID
-						ph.Connection.ProcessName = c.ProcessName
-						handleHit(ph)
-						resolved = true
-						break
-					}
-				}
-				if !resolved {
-					if time.Since(ph.Timestamp) >= 5*time.Second {
-						handleHit(ph) // 超时，以 PID=0 发出
-					} else {
-						remaining = append(remaining, ph)
-					}
+				if c, ok := connIndex[watch.ConnKey(ph.Connection)]; ok {
+					ph.Connection.PID = c.PID
+					ph.Connection.ProcessName = c.ProcessName
+					handleHit(ph)
+				} else if time.Since(ph.Timestamp) >= 5*time.Second {
+					handleHit(ph)
+				} else {
+					remaining = append(remaining, ph)
 				}
 			}
 			pendingHits = remaining

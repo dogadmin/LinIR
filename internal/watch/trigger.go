@@ -87,12 +87,10 @@ func (tp *TriggerPolicy) Evaluate(hit HitEvent) TriggerDecision {
 	return TriggerDecision{ShouldEnrich: true}
 }
 
-// dedupeKey 生成去重键：IOC值 + 远端地址:端口
-// 不含 PID 和本地端口，避免 BPF/conntrack 事件模式下同一 IOC 的不同连接重复报告
+// dedupeKey 生成去重键：IOC值 + 完整5元组连接键。
+// 每个真实连接（不同本地端口）是独立事件，不得合并。
 func dedupeKey(hit HitEvent) string {
-	return fmt.Sprintf("%s:%s:%d",
-		hit.IOC.Value,
-		hit.Connection.RemoteAddress, hit.Connection.RemotePort)
+	return hit.IOC.Value + ":" + ConnKey(hit.Connection)
 }
 
 func (tp *TriggerPolicy) cleanExpired() {

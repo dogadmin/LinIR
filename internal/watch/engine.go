@@ -23,6 +23,7 @@ type Engine struct {
 	enricher     *Enricher
 	writer       *EventWriter
 	yaraScanner  *yara.Scanner
+	metrics      WatchMetrics
 	scanCount    int
 	lastStatusAt time.Time
 }
@@ -121,7 +122,7 @@ func (e *Engine) runConntrack(ctx context.Context) error {
 	fmt.Println("按 Ctrl+C 停止监控")
 	fmt.Println()
 
-	monitor := NewConntrackMonitor(e.iocStore, e.cfg.Interface)
+	monitor := NewConntrackMonitor(e.iocStore, e.cfg.Interface, &e.metrics)
 
 	// 后台启动 conntrack 监听
 	ctxMon, cancelMon := context.WithCancel(ctx)
@@ -169,29 +170,25 @@ func (e *Engine) runConntrack(ctx context.Context) error {
 				pendingHits = append(pendingHits, hit)
 			}
 		case <-ticker.C:
-			// 用轮询数据解析 pending 的 PID=0 事件
+			// 用轮询数据解析 pending 的 PID=0 事件（完整 5 元组匹配）
 			if len(pendingHits) > 0 {
 				conns, _ := e.collectors.Network.CollectConnections(ctx)
+				connIndex := make(map[string]*model.ConnectionInfo, len(conns))
+				for i := range conns {
+					if conns[i].PID > 0 {
+						connIndex[ConnKey(conns[i])] = &conns[i]
+					}
+				}
 				var remaining []HitEvent
 				for _, ph := range pendingHits {
-					resolved := false
-					for _, c := range conns {
-						if c.PID > 0 && c.Proto == ph.Connection.Proto &&
-							c.RemoteAddress == ph.Connection.RemoteAddress &&
-							c.RemotePort == ph.Connection.RemotePort {
-							ph.Connection.PID = c.PID
-							ph.Connection.ProcessName = c.ProcessName
-							e.handleHit(ctx, ph)
-							resolved = true
-							break
-						}
-					}
-					if !resolved {
-						if time.Since(ph.Timestamp) >= 5*time.Second {
-							e.handleHit(ctx, ph)
-						} else {
-							remaining = append(remaining, ph)
-						}
+					if c, ok := connIndex[ConnKey(ph.Connection)]; ok {
+						ph.Connection.PID = c.PID
+						ph.Connection.ProcessName = c.ProcessName
+						e.handleHit(ctx, ph)
+					} else if time.Since(ph.Timestamp) >= 5*time.Second {
+						e.handleHit(ctx, ph) // 超时，PID=0 发出
+					} else {
+						remaining = append(remaining, ph)
 					}
 				}
 				pendingHits = remaining

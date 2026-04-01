@@ -24,13 +24,15 @@ import (
 type ConntrackMonitor struct {
 	iocStore *IOCStore
 	events   chan HitEvent
+	metrics  *WatchMetrics
 }
 
 // NewConntrackMonitor 创建 conntrack 监控器（iface 参数在 Linux 上不使用，conntrack 监听所有接口）
-func NewConntrackMonitor(store *IOCStore, iface string) *ConntrackMonitor {
+func NewConntrackMonitor(store *IOCStore, iface string, metrics *WatchMetrics) *ConntrackMonitor {
 	return &ConntrackMonitor{
 		iocStore: store,
-		events:   make(chan HitEvent, 256),
+		events:   make(chan HitEvent, 4096),
+		metrics:  metrics,
 	}
 }
 
@@ -101,12 +103,13 @@ func (m *ConntrackMonitor) handleEvent(ev ct.Event) {
 			Confidence:    "high",
 			State:         "NEW",
 		}
-		m.events <- HitEvent{
-			Timestamp:  now,
-			IOC:        ioc,
-			MatchType:  "direct_ip",
-			Connection: conn,
-		}
+		m.emit(HitEvent{
+			Timestamp:   now,
+			IOC:         ioc,
+			MatchType:   "direct_ip",
+			Connection:  conn,
+			SourceStage: "conntrack_new",
+		})
 		return
 	}
 
@@ -123,11 +126,27 @@ func (m *ConntrackMonitor) handleEvent(ev ct.Event) {
 			Confidence:    "high",
 			State:         "NEW",
 		}
-		m.events <- HitEvent{
-			Timestamp:  now,
-			IOC:        ioc,
-			MatchType:  "direct_ip",
-			Connection: conn,
+		m.emit(HitEvent{
+			Timestamp:   now,
+			IOC:         ioc,
+			MatchType:   "direct_ip",
+			Connection:  conn,
+			SourceStage: "conntrack_new",
+		})
+	}
+}
+
+// emit 非阻塞发送命中事件，满则丢弃并计数
+func (m *ConntrackMonitor) emit(hit HitEvent) {
+	if m.metrics != nil {
+		m.metrics.RawEventsTotal.Add(1)
+		m.metrics.IOCMatchedTotal.Add(1)
+	}
+	select {
+	case m.events <- hit:
+	default:
+		if m.metrics != nil {
+			m.metrics.EventChannelOverflow.Add(1)
 		}
 	}
 }

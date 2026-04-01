@@ -31,13 +31,15 @@ type ConntrackMonitor struct {
 	iocStore  *IOCStore
 	events    chan HitEvent
 	ifaceName string // 用户指定的接口名，空=自动检测
+	metrics   *WatchMetrics
 }
 
-func NewConntrackMonitor(store *IOCStore, iface string) *ConntrackMonitor {
+func NewConntrackMonitor(store *IOCStore, iface string, metrics *WatchMetrics) *ConntrackMonitor {
 	return &ConntrackMonitor{
 		iocStore:  store,
-		events:    make(chan HitEvent, 256),
+		events:    make(chan HitEvent, 4096),
 		ifaceName: iface,
+		metrics:   metrics,
 	}
 }
 
@@ -214,10 +216,11 @@ func (m *ConntrackMonitor) matchAndEmit(srcIP, dstIP net.IP, srcPort, dstPort ui
 
 	// 出站: 目标 IP 命中 IOC
 	if ioc, ok := m.iocStore.MatchIP(dstIP.String()); ok {
-		m.events <- HitEvent{
-			Timestamp: now,
-			IOC:       ioc,
-			MatchType: "direct_ip",
+		m.emit(HitEvent{
+			Timestamp:   now,
+			IOC:         ioc,
+			MatchType:   "direct_ip",
+			SourceStage: "bpf_syn",
 			Connection: model.ConnectionInfo{
 				Proto:         "tcp",
 				Family:        family,
@@ -229,16 +232,17 @@ func (m *ConntrackMonitor) matchAndEmit(srcIP, dstIP net.IP, srcPort, dstPort ui
 				Confidence:    "high",
 				State:         "SYN_SENT",
 			},
-		}
+		})
 		return
 	}
 
 	// 入站: 源 IP 命中 IOC
 	if ioc, ok := m.iocStore.MatchIP(srcIP.String()); ok {
-		m.events <- HitEvent{
-			Timestamp: now,
-			IOC:       ioc,
-			MatchType: "direct_ip",
+		m.emit(HitEvent{
+			Timestamp:   now,
+			IOC:         ioc,
+			MatchType:   "direct_ip",
+			SourceStage: "bpf_syn",
 			Connection: model.ConnectionInfo{
 				Proto:         "tcp",
 				Family:        family,
@@ -250,6 +254,21 @@ func (m *ConntrackMonitor) matchAndEmit(srcIP, dstIP net.IP, srcPort, dstPort ui
 				Confidence:    "high",
 				State:         "SYN_SENT",
 			},
+		})
+	}
+}
+
+// emit 非阻塞发送命中事件
+func (m *ConntrackMonitor) emit(hit HitEvent) {
+	if m.metrics != nil {
+		m.metrics.RawEventsTotal.Add(1)
+		m.metrics.IOCMatchedTotal.Add(1)
+	}
+	select {
+	case m.events <- hit:
+	default:
+		if m.metrics != nil {
+			m.metrics.EventChannelOverflow.Add(1)
 		}
 	}
 }

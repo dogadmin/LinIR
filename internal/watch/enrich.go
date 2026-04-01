@@ -88,13 +88,21 @@ func ResolveHitPID(ctx context.Context, hit *HitEvent, collectors *collector.Pla
 
 // Enrich 对命中事件进行上下文补采和评分
 func (e *Enricher) Enrich(ctx context.Context, hit HitEvent, cache *ScanCache) EnrichedEvent {
+	resolveState := "unresolved"
+	if hit.Connection.PID > 0 {
+		resolveState = "immediate"
+	}
+
 	evt := EnrichedEvent{
-		Timestamp:  hit.Timestamp,
-		EventID:    uuid.NewString()[:8],
-		IOC:        hit.IOC,
-		MatchType:  hit.MatchType,
-		Connection: hit.Connection,
-		Confidence: "high",
+		Timestamp:       hit.Timestamp,
+		EventID:         uuid.NewString()[:8],
+		IOC:             hit.IOC,
+		MatchType:       hit.MatchType,
+		Connection:      hit.Connection,
+		Confidence:      "high",
+		SourceStage:     hit.SourceStage,
+		PIDResolveState: resolveState,
+		DedupeKey:       hit.IOC.Value + ":" + ConnKey(hit.Connection),
 	}
 
 	// 1. 进程上下文——从缓存 O(1) 查找

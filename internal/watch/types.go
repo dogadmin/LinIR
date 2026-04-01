@@ -1,10 +1,17 @@
 package watch
 
 import (
+	"fmt"
+	"sync/atomic"
 	"time"
 
 	"github.com/dogadmin/LinIR/internal/model"
 )
+
+// ConnKey 生成统一的连接 5 元组键，跨平台所有匹配/去重/pending 必须使用此函数。
+func ConnKey(c model.ConnectionInfo) string {
+	return fmt.Sprintf("%s:%s:%d:%s:%d", c.Proto, c.LocalAddress, c.LocalPort, c.RemoteAddress, c.RemotePort)
+}
 
 // IOC 表示一条 IOC 指标
 type IOC struct {
@@ -25,6 +32,23 @@ type HitEvent struct {
 	IOC        IOC                  `json:"ioc"`
 	MatchType  string               `json:"match_type"`
 	Connection model.ConnectionInfo `json:"connection"`
+	// 事件溯源
+	SourceStage string `json:"source_stage,omitempty"` // conntrack_new / nf_conntrack_poll / proc_poll / bpf_syn / macos_conn_poll
+}
+
+// WatchMetrics 跨平台观测计数器
+type WatchMetrics struct {
+	RawEventsTotal           atomic.Int64
+	IOCMatchedTotal          atomic.Int64
+	PIDResolvedImmediate     atomic.Int64
+	PIDResolvedDeferred      atomic.Int64
+	PIDUnresolved            atomic.Int64
+	OutputEmitted            atomic.Int64
+	OutputDeduped            atomic.Int64
+	OutputRateLimited        atomic.Int64
+	OutputWhitelisted        atomic.Int64
+	PendingCurrent           atomic.Int64
+	EventChannelOverflow     atomic.Int64
 }
 
 // TriggerDecision 表示去重/频控的决策结果
@@ -52,6 +76,10 @@ type EnrichedEvent struct {
 	Confidence  string               `json:"confidence"`
 	Evidence    []model.Evidence     `json:"evidence"`
 	Summary     string               `json:"summary"`
+	// 事件溯源
+	SourceStage     string `json:"source_stage,omitempty"`      // conntrack_new / bpf_syn / proc_poll / ...
+	PIDResolveState string `json:"pid_resolve_state,omitempty"` // immediate / deferred / unresolved
+	DedupeKey       string `json:"dedupe_key,omitempty"`
 }
 
 // BinaryContext 表示命中进程对应的二进制上下文
