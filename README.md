@@ -107,18 +107,30 @@ condition: any of ($s*)           // 通配符集合
 
 ### 评分
 
-加权证据评分模型，内置 14 条规则：
+加权证据评分模型，"单点低分 + 组合高分 + confidence 分离"设计：
 
-| 指标 | 分值 | 严重度 |
-|---|---|---|
-| 可执行文件位于 /tmp | +25 | high |
-| 解释器有外连 | +20 | medium |
-| 持久化目标在临时目录 | +25 | high |
-| 系统级 ld.so.preload | +30 | high |
-| /dev/tcp 反弹 shell 模式 | +30 | critical |
-| YARA 规则命中 | +30 | high |
-| 内核模块视图不一致 | +25 | high |
-| Rootkit 指标 | +30 | critical |
+**核心规则（基础分）：**
+
+| 指标 | 分值 | 严重度 | 说明 |
+|---|---|---|---|
+| 可执行文件位于 /tmp | +10 | low | 单点仅作线索 |
+| +联网 | +10 | medium | 组合增强 |
+| +interpreter (shell/python) | +5 | medium | 上下文增强 |
+| 进程 exe 已删除 | +5 | low | 单点线索 |
+| Web 服务派生 shell（弱） | +10 | medium | 无网络连接 |
+| Web 服务派生 shell（强） | +25 | high | 有活跃连接 |
+| 持久化目标在临时目录 | +15 | medium | 三级递进 |
+| +已激活 | +10 | high | |
+| +激活且联网 | +10 | high | |
+| 系统级 ld.so.preload | +15 | medium | 降分，路径异常另加 +10 |
+| /dev/tcp 反弹 shell | +25 | critical | 强反弹 shell |
+| YARA 命中（按级别） | +10/+15/+20/+25 | low~critical | 4 级分层 |
+| 内核模块视图不一致 | +15 | high | |
+| Rootkit 疑似 | +15 | high | 主要降 confidence |
+
+**组合增强项：** 临时目录+YARA、Webshell+网络、持久化+YARA+网络 等 7 个组合规则额外加 +10~+15。
+
+**confidence 分离：** `host_trust_low`、`orphan_connections`、`process_invisible` 不再直接堆高恶意分，而是降低 `confidence` 并记录到 `integrity_flags`。
 
 总分 0-100，严重度分级：info / low / medium / high / critical。
 
@@ -384,21 +396,23 @@ path:/usr/lib/systemd/
 ioc:8.8.8.8
 ```
 
-**命中事件评分模型：**
+**命中事件评分模型（单点低分 + 组合高分）：**
 
 | 指标 | 分值 | 说明 |
 |---|---|---|
-| IOC 命中 | +20 | 基础分 |
-| exe 在临时目录 | +25 | 二进制可疑 |
-| exe 已被删除 | +15 | 二进制异常 |
-| 进程关联持久化 | +20 | 多维关联 |
-| YARA 规则命中 | +30 | 规则确认 |
-| 进程信息不可见 | +20 | 可见性异常 |
-| 二进制不存在 | +15 | 文件异常 |
+| IOC 命中 | +20 | 基础触发分 |
+| exe 在临时目录 | +10 | 单点线索（+interpreter 另加 +10） |
+| exe 已被删除 | +5 | 线索分 |
+| Web 服务器派生 shell | +25 | 强 Webshell 指标 |
+| 进程关联持久化 | +10 | 持久化关联（+路径异常 +5） |
+| YARA 命中 | +10/+15/+20/+25 | 按 severity_hint 分 4 级 |
+| 进程信息不可见 | +5 | 主要降 confidence，不堆分 |
+| 组合：IOC+临时目录 | +10 | 组合增强 |
+| 组合：IOC+持久化+YARA | +15 | 强确认组合 |
 
-每个事件输出：IOC、连接详情、进程上下文、二进制哈希、持久化关联、YARA 命中、完整性状态、评分、严重度、可信度、证据列表。
+每个事件输出：IOC、连接详情、进程上下文、二进制哈希、持久化关联、YARA 命中、完整性状态、评分、严重度、可信度、证据列表、来源阶段（conntrack/BPF/polling）、PID 解析状态（immediate/deferred/unresolved）。
 
-**去重机制：** 同一 IOC + 同一远端地址:端口在 60 秒窗口内只报一次，支持频率限制（`--max-events`）和白名单过滤。
+**去重机制：** 基于完整 5 元组（proto + 本地地址:端口 + 远端地址:端口）+ IOC 值。每个真实连接是独立事件，不同本地端口不会被合并。PID=0 事件使用 5 秒短窗口，不阻塞后续带 PID 的事件通过。
 
 > watch 模式也集成在 GUI 仪表盘中（"IOC 监控"选项卡），支持在浏览器中输入 IOC 列表、实时查看命中事件流。
 
