@@ -92,6 +92,7 @@ func (a *App) RunSingle(ctx context.Context, domain string) error {
 	if err := a.runPreflight(ctx); err != nil && !a.cfg.Force {
 		return err
 	}
+	a.result.Capabilities = detectCapabilities()
 
 	switch domain {
 	case "process":

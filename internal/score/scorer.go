@@ -21,7 +21,6 @@ func Compute(result *model.CollectionResult) *model.ScoreResult {
 		Confidence: result.SelfCheck.CollectionConfidence,
 	}
 
-	// 构建辅助索引
 	ctx := buildScoringContext(result)
 
 	scoreProcesses(sr, result.Processes, ctx)
@@ -46,20 +45,13 @@ func Compute(result *model.CollectionResult) *model.ScoreResult {
 
 // ========== 评分上下文 ==========
 
-// scoringContext 预构建的交叉索引，供组合规则查询
 type scoringContext struct {
-	// PID → 是否有活跃网络连接
-	pidNetworked map[int]bool
-	// PID → ProcessInfo 快速查找
-	pidProc map[int]*model.ProcessInfo
-	// exe 路径 → PID 列表
-	exePIDs map[string][]int
-	// 持久化目标 → 是否正在运行
-	persistTargetRunning map[string]bool
-	// 持久化目标 → 是否有网络连接
+	pidNetworked           map[int]bool
+	pidProc                map[int]*model.ProcessInfo
+	exePIDs                map[string][]int
+	persistTargetRunning   map[string]bool
 	persistTargetNetworked map[string]bool
-	// 有 YARA 命中的路径集合
-	yaraHitPaths map[string]bool
+	yaraHitPaths           map[string]bool
 }
 
 func buildScoringContext(result *model.CollectionResult) *scoringContext {
@@ -79,13 +71,11 @@ func buildScoringContext(result *model.CollectionResult) *scoringContext {
 			ctx.exePIDs[p.Exe] = append(ctx.exePIDs[p.Exe], p.PID)
 		}
 	}
-
 	for _, c := range result.Connections {
 		if c.PID > 0 && (c.State == "ESTABLISHED" || c.State == "SYN_SENT") {
 			ctx.pidNetworked[c.PID] = true
 		}
 	}
-
 	for _, item := range result.Persistence {
 		for _, flag := range item.RiskFlags {
 			if flag == "target_currently_running" {
@@ -96,17 +86,15 @@ func buildScoringContext(result *model.CollectionResult) *scoringContext {
 			}
 		}
 	}
-
 	for _, yh := range result.YaraHits {
 		ctx.yaraHitPaths[yh.TargetPath] = true
 	}
-
 	return ctx
 }
 
 // ========== 辅助函数 ==========
 
-func add(sr *model.ScoreResult, domain, rule, desc string, score int, severity string, details map[string]interface{}) {
+func addEvidence(sr *model.ScoreResult, domain, rule, desc string, score int, severity string, details map[string]interface{}) {
 	sr.Evidence = append(sr.Evidence, model.Evidence{
 		Domain: domain, Rule: rule, Description: desc,
 		Score: score, Severity: severity, Details: details,
@@ -179,41 +167,41 @@ func scoreProcesses(sr *model.ScoreResult, procs []model.ProcessInfo, ctx *scori
 			case "exe_in_tmp":
 				action := checkProcessSuppress("exe_in_tmp", &p, ctx)
 				if action != ActionSuppress {
-					add(sr, "process", "exe_in_tmp", fmt.Sprintf("PID %d (%s) 可执行文件位于临时目录", p.PID, p.Name), applyScore(10, action), "low", d)
+					addEvidence(sr, "process", RuleExeInTmp, fmt.Sprintf("PID %d (%s) 可执行文件位于临时目录", p.PID, p.Name), applyScore(10, action), "low", d)
 					if networked {
-						add(sr, "process", "exe_in_tmp_networked", fmt.Sprintf("PID %d (%s) 临时目录执行且联网", p.PID, p.Name), applyScore(10, action), "medium", d)
+						addEvidence(sr, "process", RuleExeInTmpNetworked, fmt.Sprintf("PID %d (%s) 临时目录执行且联网", p.PID, p.Name), applyScore(10, action), "medium", d)
 					}
 					if isInterpreterName(p.Name) {
-						add(sr, "process", "exe_in_tmp_interpreter", fmt.Sprintf("PID %d (%s) 临时目录 shell/interpreter", p.PID, p.Name), applyScore(5, action), "medium", d)
+						addEvidence(sr, "process", RuleExeInTmpInterpreter, fmt.Sprintf("PID %d (%s) 临时目录 shell/interpreter", p.PID, p.Name), applyScore(5, action), "medium", d)
 					}
 				}
 
 			case "exe_deleted":
 				action := checkProcessSuppress("exe_deleted", &p, ctx)
 				if action != ActionSuppress {
-					add(sr, "process", "exe_deleted", fmt.Sprintf("PID %d (%s) 可执行文件已删除", p.PID, p.Name), applyScore(5, action), "low", d)
+					addEvidence(sr, "process", RuleExeDeleted, fmt.Sprintf("PID %d (%s) 可执行文件已删除", p.PID, p.Name), applyScore(5, action), "low", d)
 					if networked {
-						add(sr, "process", "exe_deleted_networked", fmt.Sprintf("PID %d (%s) 已删除且联网", p.PID, p.Name), applyScore(5, action), "medium", d)
+						addEvidence(sr, "process", RuleExeDeletedNetworked, fmt.Sprintf("PID %d (%s) 已删除且联网", p.PID, p.Name), applyScore(5, action), "medium", d)
 					}
 				}
 
 			case "webserver_spawned_shell":
 				if networked {
-					add(sr, "process", "webshell_indicator_strong", fmt.Sprintf("PID %d (%s) Web 服务派生 shell 且有连接", p.PID, p.Name), 25, "high", d)
+					addEvidence(sr, "process", RuleWebshellStrong, fmt.Sprintf("PID %d (%s) Web 服务派生 shell 且有连接", p.PID, p.Name), 25, "high", d)
 				} else {
-					add(sr, "process", "webshell_indicator_weak", fmt.Sprintf("PID %d (%s) Web 服务派生 shell", p.PID, p.Name), 10, "medium", d)
+					addEvidence(sr, "process", RuleWebshellWeak, fmt.Sprintf("PID %d (%s) Web 服务派生 shell", p.PID, p.Name), 10, "medium", d)
 				}
 
 			case "fake_kernel_thread":
-				add(sr, "process", "fake_kthread", fmt.Sprintf("PID %d (%s) 伪装内核线程", p.PID, p.Name), 10, "medium", d)
+				addEvidence(sr, "process", RuleFakeKthread, fmt.Sprintf("PID %d (%s) 伪装内核线程", p.PID, p.Name), 10, "medium", d)
 				if networked {
-					add(sr, "process", "fake_kthread_networked", fmt.Sprintf("PID %d (%s) 伪内核线程且联网", p.PID, p.Name), 10, "high", d)
+					addEvidence(sr, "process", RuleFakeKthreadNetworked, fmt.Sprintf("PID %d (%s) 伪内核线程且联网", p.PID, p.Name), 10, "high", d)
 				}
 
 			case "persistent_and_networked":
-				add(sr, "process", "persistent_networked", fmt.Sprintf("PID %d (%s) 持久化且联网", p.PID, p.Name), 10, "medium", d)
+				addEvidence(sr, "process", RulePersistNetworked, fmt.Sprintf("PID %d (%s) 持久化且联网", p.PID, p.Name), 10, "medium", d)
 				if isInTmp(p.Exe) {
-					add(sr, "process", "persistent_networked_abnormal_path", fmt.Sprintf("PID %d (%s) 持久化联网且路径异常", p.PID, p.Name), 5, "high", d)
+					addEvidence(sr, "process", RulePersistNetworkedPath, fmt.Sprintf("PID %d (%s) 持久化联网且路径异常", p.PID, p.Name), 5, "high", d)
 				}
 			}
 		}
@@ -237,12 +225,10 @@ func scoreNetwork(sr *model.ScoreResult, conns []model.ConnectionInfo) {
 			case flag == "orphan_active_connection":
 				orphanCount++
 			case strings.HasPrefix(flag, "suspicious_remote_port:"):
-				// 单看端口仅作线索
-				add(sr, "network", "suspicious_port", fmt.Sprintf("连接到可疑端口 %s:%d", c.RemoteAddress, c.RemotePort), 5, "low", d)
+				addEvidence(sr, "network", RuleSuspiciousPort, fmt.Sprintf("连接到可疑端口 %s:%d", c.RemoteAddress, c.RemotePort), 5, "low", d)
 			}
 		}
 	}
-	// orphan 不直接加恶意分，进入 integrity_flags
 	if orphanCount > 3 {
 		addIntegrityFlag(sr, fmt.Sprintf("orphan_active_connections:%d", orphanCount))
 		downgradeConfidence(sr, "medium", fmt.Sprintf("%d 个无归属活跃连接", orphanCount))
@@ -265,50 +251,49 @@ func scorePersistence(sr *model.ScoreResult, items []model.PersistenceItem, ctx 
 		for _, flag := range item.RiskFlags {
 			switch flag {
 			case "target_in_tmp":
-				add(sr, "persistence", "persist_in_tmp", fmt.Sprintf("%s 目标位于临时目录", item.Path), 15, "medium", d)
+				addEvidence(sr, "persistence", RulePersistInTmp, fmt.Sprintf("%s 目标位于临时目录", item.Path), 15, "medium", d)
 				if active {
-					add(sr, "persistence", "persist_in_tmp_active", fmt.Sprintf("%s 临时目录持久化已激活", item.Path), 10, "high", d)
+					addEvidence(sr, "persistence", RulePersistInTmpActive, fmt.Sprintf("%s 临时目录持久化已激活", item.Path), 10, "high", d)
 				}
 				if activeNet {
-					add(sr, "persistence", "persist_in_tmp_active_net", fmt.Sprintf("%s 临时目录持久化激活且联网", item.Path), 10, "high", d)
+					addEvidence(sr, "persistence", RulePersistInTmpActNet, fmt.Sprintf("%s 临时目录持久化激活且联网", item.Path), 10, "high", d)
 				}
 
 			case "system_wide_preload":
-				add(sr, "persistence", "global_ld_preload_present", fmt.Sprintf("系统级 ld.so.preload: %s", item.Target), 15, "medium", d)
+				addEvidence(sr, "persistence", RulePreloadPresent, fmt.Sprintf("系统级 ld.so.preload: %s", item.Target), 15, "medium", d)
 				if isInTmp(item.Target) || !item.Exists {
-					add(sr, "persistence", "preload_path_abnormal", fmt.Sprintf("preload 路径异常: %s", item.Target), 10, "high", d)
+					addEvidence(sr, "persistence", RulePreloadPathAbnorm, fmt.Sprintf("preload 路径异常: %s", item.Target), 10, "high", d)
 				}
 
 			case "dev_tcp_reverse_shell":
-				// 区分强弱：看是否有明确的 shell + /dev/tcp 组合
-				add(sr, "persistence", "reverse_shell_strong", fmt.Sprintf("%s 反弹 shell 模式", item.Path), 25, "critical", d)
+				addEvidence(sr, "persistence", RuleReverseShell, fmt.Sprintf("%s 反弹 shell 模式", item.Path), 25, "critical", d)
 				addIntegrityFlag(sr, "reverse_shell_pattern")
 				if active {
-					add(sr, "persistence", "reverse_shell_active", fmt.Sprintf("%s 反弹 shell 已激活", item.Path), 10, "critical", d)
+					addEvidence(sr, "persistence", RuleReverseShellActive, fmt.Sprintf("%s 反弹 shell 已激活", item.Path), 10, "critical", d)
 				}
 
 			case "pipe_to_shell":
 				pipeAction := checkPersistenceSuppress("pipe_to_shell", &item, ctx)
 				if pipeAction != ActionSuppress {
-					add(sr, "persistence", "pipe_shell", fmt.Sprintf("%s curl/wget 管道执行", item.Path), applyScore(8, pipeAction), "low", d)
+					addEvidence(sr, "persistence", RulePipeShell, fmt.Sprintf("%s curl/wget 管道执行", item.Path), applyScore(8, pipeAction), "low", d)
 					if active {
-						add(sr, "persistence", "pipe_shell_active", fmt.Sprintf("%s 管道执行已激活", item.Path), applyScore(8, pipeAction), "medium", d)
+						addEvidence(sr, "persistence", RulePipeShellActive, fmt.Sprintf("%s 管道执行已激活", item.Path), applyScore(8, pipeAction), "medium", d)
 					}
 				}
 
 			case "ld_preload_export":
-				add(sr, "persistence", "profile_ld_preload", fmt.Sprintf("shell profile %s 设置 LD_PRELOAD", item.Path), 15, "medium", d)
+				addEvidence(sr, "persistence", RuleProfileLdPreload, fmt.Sprintf("shell profile %s 设置 LD_PRELOAD", item.Path), 15, "medium", d)
 
 			case "dyld_inject_export":
-				add(sr, "persistence", "profile_dyld_insert", fmt.Sprintf("shell profile %s 设置 DYLD_INSERT_LIBRARIES", item.Path), 15, "medium", d)
+				addEvidence(sr, "persistence", RuleProfileDyldInsert, fmt.Sprintf("shell profile %s 设置 DYLD_INSERT_LIBRARIES", item.Path), 15, "medium", d)
 
 			case "ld_preload_in_env":
-				add(sr, "persistence", "systemd_env_ld_preload", fmt.Sprintf("systemd unit %s Environment 含 LD_PRELOAD", item.Path), 15, "medium", d)
+				addEvidence(sr, "persistence", RuleSystemdEnvPreload, fmt.Sprintf("systemd unit %s Environment 含 LD_PRELOAD", item.Path), 15, "medium", d)
 
 			case "target_running_with_network":
-				add(sr, "persistence", "persist_active_net", fmt.Sprintf("%s 持久化目标运行且联网", item.Path), 10, "medium", d)
+				addEvidence(sr, "persistence", RulePersistActiveNet, fmt.Sprintf("%s 持久化目标运行且联网", item.Path), 10, "medium", d)
 				if isInTmp(item.Target) || ctx.yaraHitPaths[item.Target] {
-					add(sr, "persistence", "persist_active_net_abnormal", fmt.Sprintf("%s 活跃持久化路径异常或命中YARA", item.Path), 10, "high", d)
+					addEvidence(sr, "persistence", RulePersistActNetAbnorm, fmt.Sprintf("%s 活跃持久化路径异常或命中YARA", item.Path), 10, "high", d)
 				}
 			}
 		}
@@ -320,7 +305,7 @@ func scorePersistence(sr *model.ScoreResult, items []model.PersistenceItem, ctx 
 func scoreIntegrity(sr *model.ScoreResult, ir *model.IntegrityResult, pf *model.PreflightResult) {
 	if ir != nil {
 		if ir.RootkitSuspected {
-			add(sr, "integrity", "rootkit_suspected",
+			addEvidence(sr, "integrity", RuleRootkitSuspected,
 				"多项可见性异常指向可能存在 rootkit", 15, "high", map[string]interface{}{
 					"process_view_mismatch": ir.ProcessViewMismatch,
 					"network_view_mismatch": ir.NetworkViewMismatch,
@@ -331,20 +316,17 @@ func scoreIntegrity(sr *model.ScoreResult, ir *model.IntegrityResult, pf *model.
 			downgradeConfidence(sr, "low", "rootkit_suspected")
 		}
 		if len(ir.ModuleViewMismatch) > 0 {
-			add(sr, "integrity", "module_mismatch",
+			addEvidence(sr, "integrity", RuleModuleMismatch,
 				fmt.Sprintf("内核模块视图不一致: %d 项", len(ir.ModuleViewMismatch)), 15, "high",
 				map[string]interface{}{"modules": ir.ModuleViewMismatch})
 			addIntegrityFlag(sr, "module_view_mismatch")
 		}
 	}
-
-	// host_trust_low 不直接加恶意分，只降 confidence
 	if pf != nil && pf.HostTrustLevel == "low" {
 		downgradeConfidence(sr, "low", "host_trust_low")
 		addIntegrityFlag(sr, "host_trust_low")
-		// 仅在有明确 loader 劫持时少量加分
 		if len(pf.LoaderAnomaly) > 0 {
-			add(sr, "integrity", "host_trust_low_loader",
+			addEvidence(sr, "integrity", RuleHostTrustLowLoader,
 				"主机环境可信度低且存在 loader 劫持", 10, "medium", nil)
 		}
 	}
@@ -360,30 +342,17 @@ func scoreYara(sr *model.ScoreResult, hits []model.YaraHit, ctx *scoringContext)
 			"meta": hit.Meta, "linked_pid": hit.LinkedPID,
 		}
 
-		// 按 severity_hint 分 4 级
-		var score int
-		var sev string
-		switch hit.SeverityHint {
-		case "critical":
-			score, sev = 25, "critical"
-		case "high":
-			score, sev = 20, "high"
-		case "medium":
-			score, sev = 15, "medium"
-		default:
-			score, sev = 10, "low"
-		}
-		add(sr, "yara", "yara_hit_"+sev, fmt.Sprintf("YARA 规则 %s 命中: %s", hit.Rule, hit.TargetPath), score, sev, d)
+		s, sev := YaraScoreByHint(hit.SeverityHint)
+		addEvidence(sr, "yara", "yara_hit_"+sev, fmt.Sprintf("YARA 规则 %s 命中: %s", hit.Rule, hit.TargetPath), s, sev, d)
 
-		// 上下文增强
 		if hit.LinkedPID > 0 && ctx.pidNetworked[hit.LinkedPID] {
-			add(sr, "yara", "yara_on_active_process", fmt.Sprintf("YARA 命中活跃进程: %s", hit.Rule), 5, "high", d)
+			addEvidence(sr, "yara", RuleYaraOnActiveProcess, fmt.Sprintf("YARA 命中活跃进程: %s", hit.Rule), 5, "high", d)
 		}
 		if isInTmp(hit.TargetPath) {
-			add(sr, "yara", "yara_abnormal_path_bonus", fmt.Sprintf("YARA 命中临时目录: %s", hit.TargetPath), 5, "high", d)
+			addEvidence(sr, "yara", RuleYaraAbnormalPath, fmt.Sprintf("YARA 命中临时目录: %s", hit.TargetPath), 5, "high", d)
 		}
 		if hit.TargetType == "persistence-target" {
-			add(sr, "yara", "yara_on_persistence_target", fmt.Sprintf("YARA 命中持久化目标: %s", hit.TargetPath), 5, "high", d)
+			addEvidence(sr, "yara", RuleYaraOnPersistTarget, fmt.Sprintf("YARA 命中持久化目标: %s", hit.TargetPath), 5, "high", d)
 		}
 	}
 }
@@ -391,37 +360,36 @@ func scoreYara(sr *model.ScoreResult, hits []model.YaraHit, ctx *scoringContext)
 // ========== 组合增强项 ==========
 
 func scoreCombos(sr *model.ScoreResult, result *model.CollectionResult, ctx *scoringContext) {
-	// 构建已触发规则集合
 	ruleSet := make(map[string]bool)
 	for _, e := range sr.Evidence {
 		ruleSet[e.Rule] = true
 	}
-
 	has := func(rule string) bool { return ruleSet[rule] }
+	hasAnyYara := has(RuleYaraHitLow) || has(RuleYaraHitMedium) || has(RuleYaraHitHigh) || has(RuleYaraHitCritical)
 
-	if has("exe_in_tmp") && (has("yara_hit_low") || has("yara_hit_medium") || has("yara_hit_high") || has("yara_hit_critical")) {
-		add(sr, "combo", "combo_tmp_exec_and_yara", "临时目录执行 + YARA 命中", 10, "high", nil)
+	if has(RuleExeInTmp) && hasAnyYara {
+		addEvidence(sr, "combo", RuleComboTmpYara, "临时目录执行 + YARA 命中", 10, "high", nil)
 	}
-	if has("exe_in_tmp") && has("persistent_networked") {
-		add(sr, "combo", "combo_tmp_exec_and_persist", "临时目录执行 + 持久化联网", 10, "high", nil)
+	if has(RuleExeInTmp) && has(RulePersistNetworked) {
+		addEvidence(sr, "combo", RuleComboTmpPersist, "临时目录执行 + 持久化联网", 10, "high", nil)
 	}
-	if has("exe_deleted") && (has("persist_active_net") || has("persistent_networked")) {
-		add(sr, "combo", "combo_deleted_and_persist", "已删除进程 + 持久化", 10, "high", nil)
+	if has(RuleExeDeleted) && (has(RulePersistActiveNet) || has(RulePersistNetworked)) {
+		addEvidence(sr, "combo", RuleComboDeletedPersist, "已删除进程 + 持久化", 10, "high", nil)
 	}
-	if has("webshell_indicator_strong") && (has("exe_in_tmp_networked") || has("suspicious_port")) {
-		add(sr, "combo", "combo_webshell_and_network", "Webshell 强指标 + 活跃连接", 10, "critical", nil)
+	if has(RuleWebshellStrong) && (has(RuleExeInTmpNetworked) || has(RuleSuspiciousPort)) {
+		addEvidence(sr, "combo", RuleComboWebshellNetwork, "Webshell 强指标 + 活跃连接", 10, "critical", nil)
 		addIntegrityFlag(sr, "webshell_indicator_strong")
 	}
-	if has("global_ld_preload_present") && has("preload_path_abnormal") {
-		add(sr, "combo", "combo_preload_and_active_process", "preload 风险 + 路径异常", 10, "critical", nil)
+	if has(RulePreloadPresent) && has(RulePreloadPathAbnorm) {
+		addEvidence(sr, "combo", RuleComboPreloadActive, "preload 风险 + 路径异常", 10, "critical", nil)
 		addIntegrityFlag(sr, "preload_active_impact")
 	}
-	if has("persist_active_net") && (has("yara_hit_high") || has("yara_hit_critical")) {
-		add(sr, "combo", "combo_persistence_yara_network", "持久化 + YARA + 网络", 15, "critical", nil)
+	if has(RulePersistActiveNet) && (has(RuleYaraHitHigh) || has(RuleYaraHitCritical)) {
+		addEvidence(sr, "combo", RuleComboPersistYaraNet, "持久化 + YARA + 网络", 15, "critical", nil)
 		addIntegrityFlag(sr, "ioc_persist_yara_combo")
 	}
-	if has("rootkit_suspected") && (has("exe_in_tmp") || has("webshell_indicator_strong") || has("fake_kthread")) {
-		add(sr, "combo", "combo_rootkit_plus_active_suspicious", "rootkit 嫌疑 + 活跃可疑进程", 10, "critical", nil)
+	if has(RuleRootkitSuspected) && (has(RuleExeInTmp) || has(RuleWebshellStrong) || has(RuleFakeKthread)) {
+		addEvidence(sr, "combo", RuleComboRootkitSusp, "rootkit 嫌疑 + 活跃可疑进程", 10, "critical", nil)
 	}
 }
 

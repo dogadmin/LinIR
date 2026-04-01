@@ -164,12 +164,7 @@ func enrichBinary(exePath string) *BinaryContext {
 	bc.Size = info.Size()
 	bc.IsDeleted = strings.HasSuffix(exePath, " (deleted)")
 
-	for _, prefix := range []string{"/tmp/", "/var/tmp/", "/dev/shm/", "/private/tmp/"} {
-		if strings.HasPrefix(exePath, prefix) {
-			bc.InTmpDir = true
-			break
-		}
-	}
+	bc.InTmpDir = score.IsInTmpDir(exePath)
 	if hash, err := hashutil.SHA256File(exePath); err == nil {
 		bc.SHA256 = hash
 	}
@@ -257,38 +252,28 @@ func scoreEvent(evt *EnrichedEvent) {
 	// ===== 组合增强项 =====
 	has := func(rule string) bool { return ruleSet[rule] }
 
-	if has("ioc_hit") && has("exe_in_tmp") {
-		add("combo", "combo_ioc_tmp_exec", "IOC 命中 + 临时目录执行", 10, "high")
+	if has(score.RuleIOCHit) && has(score.RuleExeInTmp) {
+		add("combo", score.RuleComboIOCTmpExec, "IOC 命中 + 临时目录执行", 10, "high")
 	}
-	if has("ioc_hit") && has("exe_deleted") {
-		add("combo", "combo_ioc_deleted_exec", "IOC 命中 + 已删除 exe", 5, "medium")
+	if has(score.RuleIOCHit) && has(score.RuleExeDeleted) {
+		add("combo", score.RuleComboIOCDeleted, "IOC 命中 + 已删除 exe", 5, "medium")
 	}
-	if has("ioc_hit") && has("persistence_linked") {
-		add("combo", "combo_ioc_persistence", "IOC 命中 + 持久化关联", 10, "high")
+	if has(score.RuleIOCHit) && has(score.RulePersistenceLinked) {
+		add("combo", score.RuleComboIOCPersistence, "IOC 命中 + 持久化关联", 10, "high")
 	}
-	if has("ioc_hit") && (has("yara_hit_high") || has("yara_hit_critical")) {
-		add("combo", "combo_ioc_yara", "IOC 命中 + YARA 高危", 10, "high")
+	if has(score.RuleIOCHit) && (has(score.RuleYaraHitHigh) || has(score.RuleYaraHitCritical)) {
+		add("combo", score.RuleComboIOCYara, "IOC 命中 + YARA 高危", 10, "high")
 	}
-	if has("webshell_strong") {
-		add("combo", "combo_ioc_webshell", "IOC 命中 + Webshell", 15, "critical")
+	if has(score.RuleWebshellStrong) {
+		add("combo", score.RuleComboIOCWebshell, "IOC 命中 + Webshell", 15, "critical")
 	}
-	if has("persistence_linked") && (has("yara_hit_high") || has("yara_hit_critical")) {
-		add("combo", "combo_ioc_persist_yara", "IOC + 持久化 + YARA", 15, "critical")
+	if has(score.RulePersistenceLinked) && (has(score.RuleYaraHitHigh) || has(score.RuleYaraHitCritical)) {
+		add("combo", score.RuleComboIOCPersistYara, "IOC + 持久化 + YARA", 15, "critical")
 	}
 
-	// ===== confidence 规则 =====
+	// ===== confidence（仅 host_trust_low，其他已在 Enrich 中处理）=====
 	if evt.Integrity != nil && evt.Integrity.HostTrustLevel == "low" {
 		evt.Confidence = "low"
-	}
-	if evt.Process == nil && evt.Connection.PID > 0 {
-		if evt.Confidence == "high" {
-			evt.Confidence = "medium"
-		}
-	}
-	if evt.Connection.PID == 0 {
-		if evt.Confidence == "high" {
-			evt.Confidence = "medium"
-		}
 	}
 
 	// ===== 汇总 =====
@@ -298,18 +283,7 @@ func scoreEvent(evt *EnrichedEvent) {
 	evt.Score = total
 	evt.Evidence = evidence
 
-	switch {
-	case total >= 80:
-		evt.Severity = "critical"
-	case total >= 60:
-		evt.Severity = "high"
-	case total >= 40:
-		evt.Severity = "medium"
-	case total >= 20:
-		evt.Severity = "low"
-	default:
-		evt.Severity = "info"
-	}
+	evt.Severity = score.SeverityFromScore(total)
 
 	proc := "unknown"
 	if evt.Process != nil {
@@ -322,4 +296,3 @@ func scoreEvent(evt *EnrichedEvent) {
 		" confidence=" + evt.Confidence
 }
 
-// isInterpreterNameWatch and isInTmpWatch moved to score.IsInterpreterProcess / score.IsInTmpDir
