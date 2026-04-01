@@ -192,49 +192,118 @@ func (e *Enricher) enrichIntegrity() *IntegrityContext {
 func scoreEvent(evt *EnrichedEvent) {
 	total := 0
 	var evidence []model.Evidence
+	ruleSet := make(map[string]bool) // 用于组合项检查
 
 	add := func(domain, rule, desc string, score int, sev string) {
 		total += score
 		evidence = append(evidence, model.Evidence{
 			Domain: domain, Rule: rule, Description: desc, Score: score, Severity: sev,
 		})
+		ruleSet[rule] = true
 	}
 
+	// ===== 基础分 =====
 	add("ioc", "ioc_hit", "IOC 命中: "+evt.IOC.Value, 20, "medium")
 
+	// ===== 进程/二进制域 =====
 	if evt.Process != nil {
 		for _, flag := range evt.Process.SuspiciousFlags {
 			switch flag {
 			case "exe_in_tmp":
-				add("process", "exe_in_tmp", "进程 exe 位于临时目录", 25, "high")
+				add("process", "exe_in_tmp", "进程 exe 位于临时目录", 10, "low")
+				if isInterpreterNameWatch(evt.Process.Name) {
+					add("process", "exe_in_tmp_interpreter", "临时目录 shell/interpreter", 10, "medium")
+				}
 			case "exe_deleted":
-				add("process", "exe_deleted", "进程 exe 已被删除", 15, "medium")
+				add("process", "exe_deleted", "进程 exe 已删除", 5, "low")
 			case "webserver_spawned_shell":
-				add("process", "webshell", "Web 服务器派生 shell", 25, "high")
+				add("process", "webshell_strong", "Web 服务器派生 shell", 25, "high")
 			}
 		}
 	} else if evt.Connection.PID > 0 {
-		add("integrity", "process_invisible", "PID 存在但进程信息不可见", 20, "medium")
+		// process_invisible 不高分，主要降 confidence
+		add("integrity", "process_invisible", "PID 存在但进程信息不可见", 5, "low")
 	}
 
 	if evt.Binary != nil {
 		if evt.Binary.InTmpDir {
-			add("binary", "binary_in_tmp", "二进制位于临时目录", 25, "high")
+			add("binary", "binary_in_tmp", "二进制位于临时目录", 10, "low")
 		}
 		if !evt.Binary.Exists {
-			add("binary", "binary_missing", "二进制文件不存在", 15, "medium")
+			add("binary", "binary_missing", "二进制文件不存在", 5, "low")
 		}
 	}
+
+	// ===== 持久化域 =====
 	if len(evt.Persistence) > 0 {
-		add("persistence", "persistence_linked", "进程关联到持久化项", 20, "high")
-	}
-	for _, yh := range evt.YaraHits {
-		add("yara", "yara_hit", "YARA 规则命中: "+yh.Rule, 30, "high")
+		add("persistence", "persistence_linked", "进程关联到持久化项", 10, "medium")
+		// 检查持久化目标是否路径异常
+		for _, p := range evt.Persistence {
+			if isInTmpWatch(p.Target) {
+				add("persistence", "persistence_linked_abnormal", "持久化目标路径异常", 5, "high")
+				break
+			}
+		}
 	}
 
+	// ===== YARA 域（分 4 级）=====
+	for _, yh := range evt.YaraHits {
+		var score int
+		var sev string
+		switch yh.SeverityHint {
+		case "critical":
+			score, sev = 25, "critical"
+		case "high":
+			score, sev = 20, "high"
+		case "medium":
+			score, sev = 15, "medium"
+		default:
+			score, sev = 10, "low"
+		}
+		add("yara", "yara_hit_"+sev, "YARA 规则命中: "+yh.Rule, score, sev)
+		if isInTmpWatch(yh.TargetPath) {
+			add("yara", "yara_on_tmp_binary", "YARA 命中临时目录目标", 5, "high")
+		}
+	}
+
+	// ===== 组合增强项 =====
+	has := func(rule string) bool { return ruleSet[rule] }
+
+	if has("ioc_hit") && has("exe_in_tmp") {
+		add("combo", "combo_ioc_tmp_exec", "IOC 命中 + 临时目录执行", 10, "high")
+	}
+	if has("ioc_hit") && has("exe_deleted") {
+		add("combo", "combo_ioc_deleted_exec", "IOC 命中 + 已删除 exe", 5, "medium")
+	}
+	if has("ioc_hit") && has("persistence_linked") {
+		add("combo", "combo_ioc_persistence", "IOC 命中 + 持久化关联", 10, "high")
+	}
+	if has("ioc_hit") && (has("yara_hit_high") || has("yara_hit_critical")) {
+		add("combo", "combo_ioc_yara", "IOC 命中 + YARA 高危", 10, "high")
+	}
+	if has("webshell_strong") {
+		add("combo", "combo_ioc_webshell", "IOC 命中 + Webshell", 15, "critical")
+	}
+	if has("persistence_linked") && (has("yara_hit_high") || has("yara_hit_critical")) {
+		add("combo", "combo_ioc_persist_yara", "IOC + 持久化 + YARA", 15, "critical")
+	}
+
+	// ===== confidence 规则 =====
 	if evt.Integrity != nil && evt.Integrity.HostTrustLevel == "low" {
 		evt.Confidence = "low"
 	}
+	if evt.Process == nil && evt.Connection.PID > 0 {
+		if evt.Confidence == "high" {
+			evt.Confidence = "medium"
+		}
+	}
+	if evt.Connection.PID == 0 {
+		if evt.Confidence == "high" {
+			evt.Confidence = "medium"
+		}
+	}
+
+	// ===== 汇总 =====
 	if total > 100 {
 		total = 100
 	}
@@ -263,4 +332,22 @@ func scoreEvent(evt *EnrichedEvent) {
 		" process=" + proc +
 		" score=" + strconv.Itoa(evt.Score) +
 		" confidence=" + evt.Confidence
+}
+
+func isInterpreterNameWatch(name string) bool {
+	for _, n := range []string{"bash", "sh", "zsh", "python", "python3", "perl", "ruby", "php", "node"} {
+		if name == n {
+			return true
+		}
+	}
+	return false
+}
+
+func isInTmpWatch(path string) bool {
+	for _, prefix := range []string{"/tmp/", "/var/tmp/", "/dev/shm/", "/private/tmp/"} {
+		if strings.HasPrefix(path, prefix) {
+			return true
+		}
+	}
+	return false
 }
