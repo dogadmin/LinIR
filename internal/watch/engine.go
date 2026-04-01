@@ -155,7 +155,14 @@ func (e *Engine) runConntrack(ctx context.Context) error {
 			}
 			return e.shutdown()
 		case hit := <-monitor.Events():
-			ResolveHitPID(ctx, &hit, e.collectors)
+			// 多次重试 targeted 查找，趁 socket FD 还在 /proc/<pid>/fd/ 中
+			for attempt := 0; attempt < 4; attempt++ {
+				ResolveHitPID(ctx, &hit, e.collectors)
+				if hit.Connection.PID > 0 {
+					break
+				}
+				time.Sleep(50 * time.Millisecond)
+			}
 			if hit.Connection.PID > 0 {
 				e.handleHit(ctx, hit)
 			} else {

@@ -407,7 +407,14 @@ func (s *Server) handleWatchStart(w http.ResponseWriter, r *http.Request) {
 			case <-ticker.C:
 				scanOnce()
 			case hit := <-ctEvents:
-				watch.ResolveHitPID(ctx, &hit, collectors)
+				// 多次重试 targeted 查找，趁 socket FD 还在 /proc/<pid>/fd/ 中
+				for attempt := 0; attempt < 4; attempt++ {
+					watch.ResolveHitPID(ctx, &hit, collectors)
+					if hit.Connection.PID > 0 {
+						break
+					}
+					time.Sleep(50 * time.Millisecond)
+				}
 				if hit.Connection.PID > 0 {
 					handleHit(hit)
 				} else {
