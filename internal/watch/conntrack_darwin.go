@@ -271,7 +271,6 @@ func (m *ConntrackMonitor) matchAndEmitProto(srcIP, dstIP net.IP, srcPort, dstPo
 }
 
 func (m *ConntrackMonitor) emit(hit HitEvent) { emitHit(m.events, hit, m.metrics) }
-}
 
 // ========== BPF 底层操作 ==========
 
