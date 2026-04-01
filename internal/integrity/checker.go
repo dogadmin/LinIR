@@ -80,6 +80,10 @@ func checkNetworkView(ir *model.IntegrityResult, conns []model.ConnectionInfo, p
 		if c.Proto == "unix" || c.SocketInode == 0 {
 			continue
 		}
+		// TIME_WAIT/CLOSE/FIN_WAIT 连接的进程已退出是正常的，不计入异常
+		if c.PID == 0 && isTerminalState(c.State) {
+			continue
+		}
 
 		if c.PID == 0 {
 			orphanCount++
@@ -122,16 +126,25 @@ func checkFileView(ir *model.IntegrityResult, persist []model.PersistenceItem) {
 	}
 }
 
+// isTerminalState 判断连接状态是否为终止态（进程已退出属于正常）
+func isTerminalState(state string) bool {
+	switch state {
+	case "TIME_WAIT", "CLOSE", "CLOSE_WAIT", "FIN_WAIT1", "FIN_WAIT2", "LAST_ACK", "CLOSING":
+		return true
+	}
+	return false
+}
+
 // evaluateRootkitSuspicion 综合判断
 func evaluateRootkitSuspicion(ir *model.IntegrityResult) {
 	weight := 0
-	weight += len(ir.ProcessViewMismatch) * 5
-	weight += len(ir.NetworkViewMismatch) * 5
+	weight += len(ir.ProcessViewMismatch) * 10
+	weight += len(ir.NetworkViewMismatch) * 3
 	weight += len(ir.FileViewMismatch) * 3
 	weight += len(ir.ModuleViewMismatch) * 15
 	weight += len(ir.VisibilityAnomalies) * 10
 
-	if weight >= 30 {
+	if weight >= 50 {
 		ir.RootkitSuspected = true
 		ir.RecommendedAction = append(ir.RecommendedAction,
 			"多数据源存在不一致，建议离线取证复核")

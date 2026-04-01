@@ -523,11 +523,21 @@ function renderYaraHits(hits) {
 
 let fbTargetInput = '';
 let fbCurrentPath = '/';
+let fbCwdLoaded = false;
 
-function openFileBrowser(inputId) {
+async function openFileBrowser(inputId) {
   fbTargetInput = inputId;
   const currentVal = document.getElementById(inputId).value.trim();
-  fbCurrentPath = currentVal || '/';
+  if (currentVal) {
+    fbCurrentPath = currentVal;
+  } else if (!fbCwdLoaded) {
+    try {
+      const resp = await fetch('/api/fs/cwd');
+      const data = await resp.json();
+      if (data.cwd) fbCurrentPath = data.cwd;
+      fbCwdLoaded = true;
+    } catch (_) {}
+  }
   document.getElementById('file-browser-modal').style.display = 'flex';
   fbNavigate(fbCurrentPath);
 }

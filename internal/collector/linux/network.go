@@ -5,6 +5,8 @@ package linux
 import (
 	"context"
 	"fmt"
+	"os"
+	"strings"
 
 	"github.com/dogadmin/LinIR/internal/model"
 	"github.com/dogadmin/LinIR/pkg/procfs"
@@ -50,6 +52,9 @@ func (c *NetworkCollector) CollectConnections(ctx context.Context) ([]model.Conn
 		inodePID = make(map[uint64]int)
 	}
 
+	// 构建 PID → 进程名 映射（读 /proc/<pid>/comm，仅读有 socket 的 PID）
+	pidNameMap := buildPIDNameMap(inodePID)
+
 	var conns []model.ConnectionInfo
 
 	// 2. 采集 TCP IPv4
@@ -63,35 +68,35 @@ func (c *NetworkCollector) CollectConnections(ctx context.Context) ([]model.Conn
 		return nil, fmt.Errorf("读取 /proc/net/tcp 失败: %w", err)
 	}
 	for _, e := range tcpEntries {
-		conns = append(conns, netEntryToConn(e, "tcp", "ipv4", inodePID))
+		conns = append(conns, netEntryToConn(e, "tcp", "ipv4", inodePID, pidNameMap))
 	}
 
 	// 3. 采集 TCP IPv6
 	tcp6Entries, _ := procfs.ReadNetTCP6()
 	for _, e := range tcp6Entries {
-		conns = append(conns, netEntryToConn(e, "tcp", "ipv6", inodePID))
+		conns = append(conns, netEntryToConn(e, "tcp", "ipv6", inodePID, pidNameMap))
 	}
 
 	// 4. 采集 UDP IPv4
 	udpEntries, _ := procfs.ReadNetUDP()
 	for _, e := range udpEntries {
-		conns = append(conns, netEntryToConn(e, "udp", "ipv4", inodePID))
+		conns = append(conns, netEntryToConn(e, "udp", "ipv4", inodePID, pidNameMap))
 	}
 
 	// 5. 采集 UDP IPv6
 	udp6Entries, _ := procfs.ReadNetUDP6()
 	for _, e := range udp6Entries {
-		conns = append(conns, netEntryToConn(e, "udp", "ipv6", inodePID))
+		conns = append(conns, netEntryToConn(e, "udp", "ipv6", inodePID, pidNameMap))
 	}
 
 	// 6. 采集 Raw 套接字
 	rawEntries, _ := procfs.ReadNetRaw()
 	for _, e := range rawEntries {
-		conns = append(conns, netEntryToConn(e, "raw", "ipv4", inodePID))
+		conns = append(conns, netEntryToConn(e, "raw", "ipv4", inodePID, pidNameMap))
 	}
 	raw6Entries, _ := procfs.ReadNetRaw6()
 	for _, e := range raw6Entries {
-		conns = append(conns, netEntryToConn(e, "raw", "ipv6", inodePID))
+		conns = append(conns, netEntryToConn(e, "raw", "ipv6", inodePID, pidNameMap))
 	}
 
 	// 7. 采集 Unix 域套接字
@@ -104,7 +109,7 @@ func (c *NetworkCollector) CollectConnections(ctx context.Context) ([]model.Conn
 }
 
 // netEntryToConn 将 procfs.NetEntry 转换为 model.ConnectionInfo
-func netEntryToConn(e procfs.NetEntry, proto, family string, inodePID map[uint64]int) model.ConnectionInfo {
+func netEntryToConn(e procfs.NetEntry, proto, family string, inodePID map[uint64]int, pidNameMap map[int]string) model.ConnectionInfo {
 	// /proc/net/tcp6 中的 IPv4-mapped IPv6 (::ffff:x.x.x.x) 归一化为 IPv4
 	if family == "ipv6" {
 		if e.LocalAddr.To4() != nil || e.RemoteAddr.To4() != nil {
@@ -138,9 +143,12 @@ func netEntryToConn(e procfs.NetEntry, proto, family string, inodePID map[uint64
 		}
 	}
 
-	// 通过 inode 关联 PID
+	// 通过 inode 关联 PID 和进程名
 	if pid, ok := inodePID[e.Inode]; ok {
 		conn.PID = pid
+		if name, ok := pidNameMap[pid]; ok {
+			conn.ProcessName = name
+		}
 	} else if e.Inode != 0 {
 		// inode 存在但找不到对应进程——可能是进程已退出或被隐藏
 		conn.Confidence = "medium"
@@ -178,4 +186,20 @@ func unixEntryToConn(e procfs.UnixSocketEntry, inodePID map[uint64]int) model.Co
 	}
 
 	return conn
+}
+
+// buildPIDNameMap 从 /proc/<pid>/comm 读取进程名，仅读有 socket 的 PID
+func buildPIDNameMap(inodePID map[uint64]int) map[int]string {
+	pids := make(map[int]struct{}, len(inodePID))
+	for _, pid := range inodePID {
+		pids[pid] = struct{}{}
+	}
+	names := make(map[int]string, len(pids))
+	for pid := range pids {
+		data, err := os.ReadFile(fmt.Sprintf("%s/%d/comm", procfs.ProcRoot, pid))
+		if err == nil {
+			names[pid] = strings.TrimSpace(string(data))
+		}
+	}
+	return names
 }

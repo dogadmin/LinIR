@@ -76,6 +76,7 @@ func (s *Server) Start() error {
 
 	// YARA + 文件浏览 API
 	mux.HandleFunc("/api/fs/browse", s.handleFsBrowse)
+	mux.HandleFunc("/api/fs/cwd", s.handleCwd)
 	mux.HandleFunc("/api/yara/scan", s.handleYaraScan)
 
 	addr := fmt.Sprintf("%s:%d", s.host, s.port)
@@ -518,6 +519,16 @@ func (s *Server) handleWatchStream(w http.ResponseWriter, r *http.Request) {
 }
 
 // ========== YARA + 文件浏览 API ==========
+
+// handleCwd 返回服务器当前工作目录
+func (s *Server) handleCwd(w http.ResponseWriter, r *http.Request) {
+	cwd, err := os.Getwd()
+	if err != nil {
+		cwd = "/"
+	}
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]string{"cwd": cwd})
+}
 
 // handleFsBrowse 返回目录列表，供前端文件浏览器使用
 func (s *Server) handleFsBrowse(w http.ResponseWriter, r *http.Request) {
