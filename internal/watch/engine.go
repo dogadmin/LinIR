@@ -282,11 +282,16 @@ func connKeyForMerge(c model.ConnectionInfo) string {
 
 // mergeNfAndTcp 合并 nf_conntrack 和 /proc/net/tcp 的连接。
 // nf_conntrack 提供完整性（RST 条目保留 10s），/proc/net/tcp 提供 PID。
+type connProcInfo struct {
+	PID         int
+	ProcessName string
+}
+
 func mergeNfAndTcp(nfConns, tcpConns []model.ConnectionInfo) []model.ConnectionInfo {
-	pidMap := make(map[string]int, len(tcpConns))
+	pidMap := make(map[string]connProcInfo, len(tcpConns))
 	for _, c := range tcpConns {
 		if c.PID > 0 {
-			pidMap[connKeyForMerge(c)] = c.PID
+			pidMap[connKeyForMerge(c)] = connProcInfo{PID: c.PID, ProcessName: c.ProcessName}
 		}
 	}
 
@@ -296,8 +301,9 @@ func mergeNfAndTcp(nfConns, tcpConns []model.ConnectionInfo) []model.ConnectionI
 	for i := range nfConns {
 		key := connKeyForMerge(nfConns[i])
 		seen[key] = struct{}{}
-		if pid, ok := pidMap[key]; ok {
-			nfConns[i].PID = pid
+		if info, ok := pidMap[key]; ok {
+			nfConns[i].PID = info.PID
+			nfConns[i].ProcessName = info.ProcessName
 		}
 		merged = append(merged, nfConns[i])
 	}

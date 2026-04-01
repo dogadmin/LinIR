@@ -105,6 +105,13 @@ func (c *NetworkCollector) CollectConnections(ctx context.Context) ([]model.Conn
 
 // netEntryToConn 将 procfs.NetEntry 转换为 model.ConnectionInfo
 func netEntryToConn(e procfs.NetEntry, proto, family string, inodePID map[uint64]int) model.ConnectionInfo {
+	// /proc/net/tcp6 中的 IPv4-mapped IPv6 (::ffff:x.x.x.x) 归一化为 IPv4
+	if family == "ipv6" {
+		if e.LocalAddr.To4() != nil || e.RemoteAddr.To4() != nil {
+			family = "ipv4"
+		}
+	}
+
 	conn := model.ConnectionInfo{
 		Proto:         proto,
 		Family:        family,
