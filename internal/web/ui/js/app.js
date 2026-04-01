@@ -452,6 +452,10 @@ function appendWatchEvent(evt) {
   const proc = evt.process ? evt.process.name : (evt.connection?.process_name || '—');
   const remote = evt.connection ? `${evt.connection.remote_address}:${evt.connection.remote_port}` : '—';
   const time = evt.timestamp ? new Date(evt.timestamp).toLocaleTimeString() : '—';
+  const pid = evt.connection?.pid || 0;
+  const resolveTag = evt.pid_resolve_state === 'deferred' ? ' <span class="tag tag-orange">deferred</span>' :
+                     evt.pid_resolve_state === 'unresolved' ? ' <span class="tag tag-blue">unresolved</span>' : '';
+  const srcLabel = (evt.source_stage || '').replace(/_/g, ' ');
   const evidenceHtml = (evt.evidence || []).map(e =>
     `<span class="tag tag-${e.severity === 'high' ? 'red' : e.severity === 'medium' ? 'orange' : 'blue'}">+${e.score} ${esc(e.description)}</span>`
   ).join(' ');
@@ -460,11 +464,11 @@ function appendWatchEvent(evt) {
     <td>${esc(time)}</td>
     <td><span class="sev-${evt.severity}">${(evt.severity||'').toUpperCase()}</span></td>
     <td><strong>${esc(evt.ioc?.value)}</strong></td>
-    <td>${evt.connection?.pid || 0}</td>
+    <td>${pid}${resolveTag}</td>
     <td>${esc(proc)}</td>
     <td>${esc(remote)}</td>
     <td><strong>${evt.score || 0}</strong></td>
-    <td>${esc(evt.confidence)}</td>
+    <td>${esc(srcLabel)}</td>
     <td>${evidenceHtml}</td>`;
   tbody.prepend(tr); // 新事件在最上面
 }
