@@ -73,7 +73,10 @@ func (tp *TriggerPolicy) Evaluate(hit HitEvent) TriggerDecision {
 	}
 
 	// 通过所有检查——允许触发
-	tp.seen[key] = time.Now()
+	// PID=0 的事件不进去重窗口，给轮询路径第二次机会解析 PID
+	if hit.Connection.PID > 0 {
+		tp.seen[key] = time.Now()
+	}
 	tp.minuteCount++
 
 	// 定期清理过期去重条目

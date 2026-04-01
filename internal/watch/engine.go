@@ -140,6 +140,9 @@ func (e *Engine) runConntrack(ctx context.Context) error {
 	e.scan(ctx)
 	fmt.Printf("[INFO] 首次扫描完成 (conntrack 模式，轮询作为补充)\n")
 
+	// pending: conntrack/BPF 事件 PID=0 暂存，等轮询补全
+	var pendingHits []HitEvent
+
 	for {
 		select {
 		case <-ctx.Done():
@@ -153,8 +156,39 @@ func (e *Engine) runConntrack(ctx context.Context) error {
 			return e.shutdown()
 		case hit := <-monitor.Events():
 			ResolveHitPID(ctx, &hit, e.collectors)
-			e.handleHit(ctx, hit)
+			if hit.Connection.PID > 0 {
+				e.handleHit(ctx, hit)
+			} else {
+				pendingHits = append(pendingHits, hit)
+			}
 		case <-ticker.C:
+			// 用轮询数据解析 pending 的 PID=0 事件
+			if len(pendingHits) > 0 {
+				conns, _ := e.collectors.Network.CollectConnections(ctx)
+				var remaining []HitEvent
+				for _, ph := range pendingHits {
+					resolved := false
+					for _, c := range conns {
+						if c.PID > 0 && c.Proto == ph.Connection.Proto &&
+							c.RemoteAddress == ph.Connection.RemoteAddress &&
+							c.RemotePort == ph.Connection.RemotePort {
+							ph.Connection.PID = c.PID
+							ph.Connection.ProcessName = c.ProcessName
+							e.handleHit(ctx, ph)
+							resolved = true
+							break
+						}
+					}
+					if !resolved {
+						if time.Since(ph.Timestamp) >= 5*time.Second {
+							e.handleHit(ctx, ph)
+						} else {
+							remaining = append(remaining, ph)
+						}
+					}
+				}
+				pendingHits = remaining
+			}
 			e.scan(ctx)
 		}
 	}

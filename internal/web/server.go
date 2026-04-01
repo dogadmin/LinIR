@@ -305,9 +305,27 @@ func (s *Server) handleWatchStart(w http.ResponseWriter, r *http.Request) {
 			cache := enricher.CollectCache(ctx)
 			evt := enricher.Enrich(ctx, hit, cache)
 			s.mu.Lock()
-			s.watchEvents = append(s.watchEvents, evt)
+			// 如果有 PID，检查是否能替换之前的 PID=0 事件
+			replaced := false
+			if evt.Connection.PID > 0 {
+				for i := range s.watchEvents {
+					if s.watchEvents[i].Connection.PID == 0 &&
+						s.watchEvents[i].IOC.Value == evt.IOC.Value &&
+						s.watchEvents[i].Connection.RemoteAddress == evt.Connection.RemoteAddress {
+						s.watchEvents[i] = evt
+						replaced = true
+						break
+					}
+				}
+			}
+			if !replaced {
+				s.watchEvents = append(s.watchEvents, evt)
+			}
 			s.mu.Unlock()
 		}
+
+		// pending: conntrack/BPF 事件 PID=0 暂存，等轮询补全
+		var pendingHits []watch.HitEvent
 
 		useNfConntrack := monitorMode == "nf_conntrack"
 		var ctEvents <-chan watch.HitEvent
@@ -328,12 +346,35 @@ func (s *Server) handleWatchStart(w http.ResponseWriter, r *http.Request) {
 			var scanErr error
 
 			if useNfConntrack {
-				// 层 2: 读 nf_conntrack + /proc/net/tcp 合并
 				conns, scanErr = watch.CollectWithNfConntrack(ctx, collectors)
 			} else {
-				// 层 3: 仅 /proc/net/tcp
 				conns, scanErr = collectors.Network.CollectConnections(ctx)
 			}
+
+			// 用本次轮询的连接数据解析 pending 的 PID=0 事件
+			var remaining []watch.HitEvent
+			for _, ph := range pendingHits {
+				resolved := false
+				for _, c := range conns {
+					if c.PID > 0 && c.Proto == ph.Connection.Proto &&
+						c.RemoteAddress == ph.Connection.RemoteAddress &&
+						c.RemotePort == ph.Connection.RemotePort {
+						ph.Connection.PID = c.PID
+						ph.Connection.ProcessName = c.ProcessName
+						handleHit(ph)
+						resolved = true
+						break
+					}
+				}
+				if !resolved {
+					if time.Since(ph.Timestamp) >= 5*time.Second {
+						handleHit(ph) // 超时，以 PID=0 发出
+					} else {
+						remaining = append(remaining, ph)
+					}
+				}
+			}
+			pendingHits = remaining
 
 			hitCount := 0
 			if len(conns) > 0 {
@@ -367,7 +408,11 @@ func (s *Server) handleWatchStart(w http.ResponseWriter, r *http.Request) {
 				scanOnce()
 			case hit := <-ctEvents:
 				watch.ResolveHitPID(ctx, &hit, collectors)
-				handleHit(hit)
+				if hit.Connection.PID > 0 {
+					handleHit(hit)
+				} else {
+					pendingHits = append(pendingHits, hit)
+				}
 			case err := <-ctErrCh:
 				// conntrack/BPF 失败，记录错误并继续轮询
 				if err != nil {
