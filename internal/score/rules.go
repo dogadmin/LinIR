@@ -75,6 +75,23 @@ const (
 	RulePersistenceLinked   = "persistence_linked"
 	RulePersistLinkedAbnorm = "persistence_linked_abnormal"
 	RuleYaraOnTmpBinary     = "yara_on_tmp_binary"
+
+	// Retained 域
+	RuleRetainedPersistChanged     = "retained_persist_changed"
+	RuleRetainedPersistTmpTarget   = "retained_persist_tmp_target"
+	RuleRetainedDeletedExe         = "retained_deleted_exe"
+	RuleRetainedTmpExecutable      = "retained_tmp_executable"
+	RuleRetainedFailedLogins       = "retained_failed_logins"
+
+	// Triggerable 域
+	RuleTriggerableTmpAutostart    = "triggerable_tmp_autostart"
+	RuleTriggerableReverseShellCron = "triggerable_reverse_shell_cron"
+	RuleTriggerablePipeShellCron   = "triggerable_pipe_shell_cron"
+
+	// 跨状态组合域
+	RuleCrossRetainedTriggerable      = "cross_retained_and_triggerable"
+	RuleCrossRetainedRuntime          = "cross_retained_and_runtime"
+	RuleCrossPersistRunningKeepalive  = "cross_persist_running_keepalive"
 )
 
 // YaraScoreByHint 返回 YARA 命中的分值和严重度（collect 和 watch 共用）

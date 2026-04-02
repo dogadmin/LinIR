@@ -87,6 +87,62 @@ func addBytesToTar(tw *tar.Writer, name string, data []byte) error {
 	return err
 }
 
+// CreateAnalysis produces a .tar.gz triage bundle for a three-state analysis result.
+func CreateAnalysis(outputDir string, result *model.AnalysisResult) error {
+	id := result.AnalysisID
+	if len(id) > 8 {
+		id = id[:8]
+	}
+
+	hostname := result.Host.Hostname
+	if hostname == "" {
+		hostname = "unknown"
+	}
+
+	bundleName := fmt.Sprintf("linir-analysis-bundle-%s-%s.tar.gz", hostname, id)
+	bundlePath := filepath.Join(outputDir, bundleName)
+
+	f, err := os.Create(bundlePath)
+	if err != nil {
+		return fmt.Errorf("creating analysis bundle %s: %w", bundlePath, err)
+	}
+	defer f.Close()
+
+	gw := gzip.NewWriter(f)
+	defer gw.Close()
+
+	tw := tar.NewWriter(gw)
+	defer tw.Close()
+
+	prefix := fmt.Sprintf("linir-analysis-%s-%s", hostname, id)
+
+	sections := map[string]interface{}{
+		"host.json":        result.Host,
+		"runtime.json":     result.Runtime,
+		"retained.json":    result.Retained,
+		"triggerable.json": result.Triggerable,
+		"timeline.json":    result.Timeline,
+		"confidence.json":  result.Confidence,
+		"errors.json":      result.Errors,
+		"full.json":        result,
+	}
+
+	for name, data := range sections {
+		if data == nil {
+			continue
+		}
+		jsonBytes, err := json.MarshalIndent(data, "", "  ")
+		if err != nil {
+			return fmt.Errorf("marshaling %s: %w", name, err)
+		}
+		if err := addBytesToTar(tw, filepath.Join(prefix, name), jsonBytes); err != nil {
+			return fmt.Errorf("adding %s to analysis bundle: %w", name, err)
+		}
+	}
+
+	return nil
+}
+
 func addFileToTar(tw *tar.Writer, path string) error {
 	info, err := os.Stat(path)
 	if err != nil {

@@ -10,5 +10,7 @@ type Capabilities struct {
 	WatchModeLayer    string `json:"watch_mode_layer,omitempty"` // "layer1"|"layer2"|"layer3"|""
 	RunningPrivileged bool   `json:"running_privileged"`
 	Platform          string `json:"platform"` // "linux"|"darwin"|"other"
+	RetainedCollection    string   `json:"retained_collection,omitempty"`    // "full"|"partial"|"unavailable"
+	TriggerableCollection string   `json:"triggerable_collection,omitempty"` // "full"|"partial"|"unavailable"
 	Notes             []string `json:"notes,omitempty"` // 能力受限原因
 }

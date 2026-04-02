@@ -23,6 +23,11 @@ type CollectionResult struct {
 	YaraHits    []YaraHit         `json:"yara_hits,omitempty"`
 	Score       *ScoreResult      `json:"score,omitempty"`
 
+	// Analysis is set when this collection was run as part of a three-state
+	// analysis. nil for standalone collect runs. Excluded from JSON to avoid
+	// circular reference (AnalysisResult.Runtime -> CollectionResult.Analysis).
+	Analysis *AnalysisResult `json:"-"`
+
 	Errors []CollectionError `json:"errors,omitempty"`
 }
 

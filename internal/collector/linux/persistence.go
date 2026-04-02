@@ -107,7 +107,7 @@ func (c *PersistenceCollector) collectSystemd(ctx context.Context) []model.Persi
 			item := model.PersistenceItem{
 				Type:      "systemd",
 				Path:      path,
-				Target:    extractExecTarget(unit.ExecStart),
+				Target:    sysparse.ExtractExecTarget(unit.ExecStart),
 				UserScope: "system",
 				Exists:    true,
 				Confidence: "high",
@@ -138,24 +138,6 @@ func (c *PersistenceCollector) collectSystemd(ctx context.Context) []model.Persi
 	return items
 }
 
-// extractExecTarget 从 ExecStart 值中提取可执行文件路径
-// ExecStart 格式可能是: /usr/bin/foo -arg1 -arg2 或 -/usr/bin/foo
-func extractExecTarget(execStart string) string {
-	if execStart == "" {
-		return ""
-	}
-	// 去掉前缀修饰符 (-/@/+/!)
-	s := execStart
-	for len(s) > 0 && (s[0] == '-' || s[0] == '@' || s[0] == '+' || s[0] == '!') {
-		s = s[1:]
-	}
-	// 取第一个空格前的部分作为路径
-	fields := strings.Fields(s)
-	if len(fields) == 0 {
-		return ""
-	}
-	return fields[0]
-}
 
 func flagSystemdRisks(item *model.PersistenceItem, unit *sysparse.SystemdUnit) {
 	target := item.Target
@@ -234,7 +216,7 @@ func parseCronFile(path string, systemFormat bool, scope string) []model.Persist
 		item := model.PersistenceItem{
 			Type:       "cron",
 			Path:       path,
-			Target:     extractCronCommand(e.Command),
+			Target:     sysparse.ExtractCronCommand(e.Command),
 			UserScope:  scope,
 			Exists:     true,
 			Confidence: "high",
@@ -300,26 +282,6 @@ func scanCronScriptDir(dir string) []model.PersistenceItem {
 	return items
 }
 
-// extractCronCommand 提取 cron 命令中的第一个可执行文件路径
-func extractCronCommand(cmd string) string {
-	cmd = strings.TrimSpace(cmd)
-	// 跳过常见的环境变量前缀
-	for strings.Contains(cmd, "=") && !strings.HasPrefix(cmd, "/") {
-		fields := strings.Fields(cmd)
-		if len(fields) <= 1 {
-			break
-		}
-		if !strings.Contains(fields[0], "=") {
-			break
-		}
-		cmd = strings.Join(fields[1:], " ")
-	}
-	fields := strings.Fields(cmd)
-	if len(fields) == 0 {
-		return ""
-	}
-	return fields[0]
-}
 
 func flagCronRisks(item *model.PersistenceItem, e sysparse.CrontabEntry) {
 	cmd := e.Command

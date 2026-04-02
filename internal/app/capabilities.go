@@ -76,6 +76,16 @@ func detectLinuxCapabilities(cap *model.Capabilities) {
 
 	// 持久化
 	cap.PersistenceCollection = "full"
+
+	// retained / triggerable: Linux 支持完整采集
+	if cap.RunningPrivileged {
+		cap.RetainedCollection = "full"
+		cap.TriggerableCollection = "full"
+	} else {
+		cap.RetainedCollection = "partial"
+		cap.TriggerableCollection = "partial"
+		cap.Notes = append(cap.Notes, "非 root: 部分历史/触发态数据不可读")
+	}
 }
 
 func detectDarwinCapabilities(cap *model.Capabilities) {
@@ -89,5 +99,14 @@ func detectDarwinCapabilities(cap *model.Capabilities) {
 		cap.NetworkCollection = "partial"
 		cap.PIDAttribution = "partial"
 		cap.Notes = append(cap.Notes, "非 root: proc_pidfdinfo 受 SIP 限制")
+	}
+
+	// retained / triggerable: macOS 支持完整采集
+	if cap.RunningPrivileged {
+		cap.RetainedCollection = "full"
+		cap.TriggerableCollection = "full"
+	} else {
+		cap.RetainedCollection = "partial"
+		cap.TriggerableCollection = "partial"
 	}
 }

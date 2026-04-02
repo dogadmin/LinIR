@@ -1,5 +1,7 @@
 package config
 
+import "time"
+
 // Version is set at build time via -ldflags.
 var Version = "0.1.0-dev"
 
@@ -18,14 +20,21 @@ type Config struct {
 	YaraRules     string
 	YaraTarget    string
 	YaraProcLinked bool
+
+	// Three-state analysis flags
+	WithRetained    bool
+	WithTriggerable bool
+	WithTimeline    bool
+	RetainedWindow  time.Duration
 }
 
 // DefaultConfig returns a Config with sensible defaults.
 func DefaultConfig() *Config {
 	return &Config{
-		Version:      Version,
-		OutputDir:    ".",
-		OutputFormat: "both",
-		Timeout:      300,
+		Version:        Version,
+		OutputDir:      ".",
+		OutputFormat:   "both",
+		Timeout:        300,
+		RetainedWindow: 72 * time.Hour,
 	}
 }

@@ -5,6 +5,7 @@ package linux
 import (
 	"context"
 	"fmt"
+	"os"
 	"strings"
 	"time"
 
@@ -120,9 +121,15 @@ func (c *ProcessCollector) collectOne(pid int, bootTime, clockTick uint64, userC
 	exe := procfs.ReadExe(pid)
 	proc.Exe = exe
 	// 检查 "(deleted)" 标记
+	// 如果去掉 (deleted) 后原路径上仍有文件，说明是包更新替换了二进制，
+	// 进程还在用旧 inode——这是正常行为，不标记为可疑。
 	if strings.HasSuffix(exe, " (deleted)") {
-		proc.Exe = strings.TrimSuffix(exe, " (deleted)")
-		proc.SuspiciousFlags = append(proc.SuspiciousFlags, "exe_deleted")
+		cleanPath := strings.TrimSuffix(exe, " (deleted)")
+		proc.Exe = cleanPath
+		if _, err := os.Stat(cleanPath); err != nil {
+			// 原路径上文件确实不存在——真正的 deleted exe
+			proc.SuspiciousFlags = append(proc.SuspiciousFlags, "exe_deleted")
+		}
 	}
 
 	// 命令行
@@ -163,11 +170,13 @@ func (c *ProcessCollector) collectOne(pid int, bootTime, clockTick uint64, userC
 // flagSuspicious 仅标记真正可疑的采集时指标。
 // 原则：单一正常行为不标记，只标记明确异常。
 func (c *ProcessCollector) flagSuspicious(proc *model.ProcessInfo) {
-	// exe 在临时目录——明确可疑
+	// exe 在临时目录——可疑，但排除已知合法场景
 	tmpPrefixes := []string{"/tmp/", "/var/tmp/", "/dev/shm/", "/dev/mqueue/"}
 	for _, prefix := range tmpPrefixes {
 		if strings.HasPrefix(proc.Exe, prefix) {
-			proc.SuspiciousFlags = append(proc.SuspiciousFlags, "exe_in_tmp")
+			if !isLegitTmpExe(proc.Exe) {
+				proc.SuspiciousFlags = append(proc.SuspiciousFlags, "exe_in_tmp")
+			}
 			break
 		}
 	}
@@ -179,4 +188,39 @@ func (c *ProcessCollector) flagSuspicious(proc *model.ProcessInfo) {
 
 	// 注意：不再单独标记 "interpreter"——bash/python/perl 运行本身不是威胁指标。
 	// 可疑组合行为在 process.Analyze() 中检测。
+}
+
+// isLegitTmpExe 判断 /tmp 下的可执行文件是否来自合法来源。
+// 排除 systemd-private 临时目录、snap/flatpak 解包、包管理器临时文件等。
+func isLegitTmpExe(exe string) bool {
+	// Match on the component after the tmp dir, so it works for
+	// /tmp/*, /var/tmp/*, /dev/shm/*, etc.
+	base := exe
+	for _, prefix := range []string{"/tmp/", "/var/tmp/", "/dev/shm/", "/dev/mqueue/"} {
+		if strings.HasPrefix(exe, prefix) {
+			base = exe[len(prefix):]
+			break
+		}
+	}
+	legitPrefixes := []string{
+		"systemd-private-",   // systemd PrivateTmp
+		"snap.",              // snap 包解包
+		"flatpak-",          // flatpak 临时文件
+		"apt-dpkg-install-",  // apt 安装过程
+		"npm-",              // npm 临时文件
+		"yarn-",             // yarn 临时文件
+		"pip-",              // pip 临时文件
+		"go-build",          // Go 构建缓存
+		"nix-build-",        // nix 构建
+		"docker-",           // docker 临时文件
+		"containerd",        // containerd 临时文件
+		"rustup-",           // rustup 临时文件
+		"cargo-install",     // cargo 安装
+	}
+	for _, prefix := range legitPrefixes {
+		if strings.HasPrefix(base, prefix) {
+			return true
+		}
+	}
+	return false
 }

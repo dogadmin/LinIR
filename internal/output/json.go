@@ -41,3 +41,26 @@ func (w *JSONWriter) Write(result *model.CollectionResult) error {
 
 	return jsonutil.WriteJSON(f, result)
 }
+
+func (w *JSONWriter) WriteAnalysis(result *model.AnalysisResult) error {
+	id := result.AnalysisID
+	if len(id) > 8 {
+		id = id[:8]
+	}
+
+	hostname := result.Host.Hostname
+	if hostname == "" {
+		hostname = "unknown"
+	}
+
+	filename := fmt.Sprintf("linir-analysis-%s-%s.json", hostname, id)
+	path := filepath.Join(w.outputDir, filename)
+
+	f, err := os.Create(path)
+	if err != nil {
+		return fmt.Errorf("creating analysis JSON output %s: %w", path, err)
+	}
+	defer f.Close()
+
+	return jsonutil.WriteJSON(f, result)
+}

@@ -16,7 +16,9 @@
   <div class="header-right">
     <span id="status" class="badge badge-waiting">等待采集</span>
     <button id="btn-collect" class="btn btn-primary" onclick="startCollect()">开始采集</button>
+    <button id="btn-analysis" class="btn btn-primary" onclick="startAnalysis()">三维分析</button>
     <button id="btn-export" class="btn btn-secondary" onclick="exportJSON()" disabled>导出 JSON</button>
+    <button id="btn-export-csv" class="btn btn-secondary" onclick="exportCSV()" disabled>导出 CSV</button>
   </div>
 </header>
 
@@ -75,6 +77,10 @@
       <button class="tab" onclick="switchTab('errors')">错误</button>
       <button class="tab" onclick="switchTab('yara')">YARA</button>
       <button class="tab" onclick="switchTab('watch')" id="tab-btn-watch">IOC 监控</button>
+      <button class="tab" onclick="switchTab('ai')" id="tab-btn-ai">AI 分析</button>
+      <button class="tab" onclick="switchTab('retained')" id="tab-btn-retained">历史残留</button>
+      <button class="tab" onclick="switchTab('triggerable')" id="tab-btn-triggerable">未来触发</button>
+      <button class="tab" onclick="switchTab('timeline')" id="tab-btn-timeline">时间线</button>
     </div>
 
     <!-- 进程表 -->
@@ -144,6 +150,76 @@
       <div class="table-wrap">
         <table id="yara-table">
           <thead><tr><th>规则名</th><th>目标文件</th><th>目标类型</th><th>关联 PID</th><th>匹配字符串</th><th>严重度</th></tr></thead>
+          <tbody></tbody>
+        </table>
+      </div>
+    </div>
+
+    <!-- AI 分析 -->
+    <div id="tab-ai" class="tab-content">
+      <div class="toolbar" style="flex-direction:column;gap:10px">
+        <div style="display:flex;gap:8px;align-items:center">
+          <label style="font-size:12px;color:var(--text2);min-width:60px">API Key:</label>
+          <input type="password" id="ai-api-key" placeholder="MiniMax API Key" style="flex:1;padding:7px 12px;background:var(--bg);border:1px solid var(--border);border-radius:6px;color:var(--text);font-size:13px">
+          <select id="ai-model" style="padding:7px 12px;background:var(--bg);border:1px solid var(--border);border-radius:6px;color:var(--text);font-size:13px">
+            <option value="MiniMax-M2.5">MiniMax-M2.5</option>
+            <option value="MiniMax-M2.5-highspeed">MiniMax-M2.5-highspeed</option>
+            <option value="MiniMax-M2.7">MiniMax-M2.7</option>
+            <option value="MiniMax-M2.7-highspeed">MiniMax-M2.7-highspeed</option>
+          </select>
+          <button class="btn btn-secondary" onclick="clearAIChat()">清空</button>
+        </div>
+        <div style="display:flex;gap:6px;flex-wrap:wrap">
+          <button class="btn btn-primary" onclick="runAIAnalyze()">一键综合分析</button>
+          <button class="btn btn-secondary" onclick="aiPreset('入侵判定')">入侵判定</button>
+          <button class="btn btn-secondary" onclick="aiPreset('后门排查')">后门排查</button>
+          <button class="btn btn-secondary" onclick="aiPreset('横向移动')">横向移动</button>
+          <button class="btn btn-secondary" onclick="aiPreset('数据外泄')">数据外泄</button>
+          <button class="btn btn-secondary" onclick="aiPreset('持久化分析')">持久化分析</button>
+          <button class="btn btn-secondary" onclick="aiPreset('处置建议')">处置建议</button>
+        </div>
+        <p style="font-size:11px;color:var(--text2);margin:0">先执行采集或三维分析，再使用 AI。API Key 仅用于本次请求，不会保存。</p>
+      </div>
+      <div id="ai-chat-panel" style="display:flex;flex-direction:column;height:calc(100vh - 420px);min-height:300px;margin-top:10px">
+        <div id="ai-messages" style="flex:1;overflow-y:auto;border:1px solid var(--border);border-radius:6px;padding:12px;background:var(--bg);margin-bottom:10px"></div>
+        <div style="display:flex;gap:8px">
+          <textarea id="ai-input" rows="2" placeholder="输入问题..." style="flex:1;padding:8px 12px;background:var(--bg);border:1px solid var(--border);border-radius:6px;color:var(--text);font-size:13px;font-family:inherit;resize:vertical"></textarea>
+          <button class="btn btn-primary" onclick="sendAIMessage()" style="align-self:flex-end">发送</button>
+        </div>
+      </div>
+      <div id="ai-status" style="margin-top:8px"></div>
+    </div>
+
+    <!-- 历史残留态 -->
+    <div id="tab-retained" class="tab-content">
+      <div id="retained-content"><p class="muted">点击「三维分析」按钮采集历史残留数据</p></div>
+    </div>
+
+    <!-- 未来可触发态 -->
+    <div id="tab-triggerable" class="tab-content">
+      <div id="triggerable-content"><p class="muted">点击「三维分析」按钮采集未来触发数据</p></div>
+    </div>
+
+    <!-- 统一时间线 -->
+    <div id="tab-timeline" class="tab-content">
+      <div class="toolbar">
+        <select id="timeline-scope-filter" onchange="filterTimeline()">
+          <option value="">全部范围</option>
+          <option value="runtime">运行态</option>
+          <option value="retained">历史态</option>
+          <option value="triggerable">触发态</option>
+        </select>
+        <select id="timeline-severity-filter" onchange="filterTimeline()">
+          <option value="">全部严重度</option>
+          <option value="critical">Critical</option>
+          <option value="high">High</option>
+          <option value="medium">Medium</option>
+          <option value="low">Low</option>
+        </select>
+      </div>
+      <div class="table-wrap" style="max-height:60vh;overflow:auto">
+        <table id="timeline-table">
+          <thead><tr><th>时间</th><th>范围</th><th>类型</th><th>对象</th><th>严重度</th><th>摘要</th></tr></thead>
           <tbody></tbody>
         </table>
       </div>

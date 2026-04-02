@@ -17,8 +17,11 @@ import (
 	"github.com/dogadmin/LinIR/internal/preflight"
 	"github.com/dogadmin/LinIR/internal/process"
 	"github.com/dogadmin/LinIR/internal/report"
+	"github.com/dogadmin/LinIR/internal/retained"
 	"github.com/dogadmin/LinIR/internal/score"
 	"github.com/dogadmin/LinIR/internal/selfcheck"
+	"github.com/dogadmin/LinIR/internal/timeline"
+	"github.com/dogadmin/LinIR/internal/triggerable"
 	"github.com/dogadmin/LinIR/internal/yara"
 )
 
@@ -151,6 +154,261 @@ func (a *App) RunYara(ctx context.Context) error {
 	a.runYaraScan(ctx)
 
 	return report.Generate(a.cfg, a.result)
+}
+
+// RunAnalysis executes the full three-state analysis pipeline:
+// runtime collection + retained + triggerable + timeline.
+func (a *App) RunAnalysis(ctx context.Context) error {
+	a.result.StartedAt = time.Now()
+	defer a.finalize()
+
+	analysisResult := &model.AnalysisResult{
+		Version:    a.cfg.Version,
+		ToolName:   "linir",
+		AnalysisID: uuid.NewString(),
+		StartedAt:  a.result.StartedAt,
+	}
+	defer func() {
+		analysisResult.CompletedAt = time.Now()
+		analysisResult.DurationMS = analysisResult.CompletedAt.Sub(analysisResult.StartedAt).Milliseconds()
+	}()
+
+	// Phase 1: Standard runtime collection
+	a.runSelfCheck(ctx)
+	if err := a.runPreflight(ctx); err != nil && !a.cfg.Force {
+		return err
+	}
+	a.result.Capabilities = detectCapabilities()
+	a.collectHost(ctx)
+	a.collectProcesses(ctx)
+	a.collectNetwork(ctx)
+	a.collectPersistence(ctx)
+	a.checkIntegrity(ctx)
+
+	process.Analyze(a.result.Processes)
+	network.Analyze(a.result.Connections)
+	persistAnalyze.Analyze(a.result.Persistence)
+	correlate.Run(a.result)
+
+	if a.cfg.YaraRules != "" {
+		a.runYaraScan(ctx)
+	}
+	a.result.Score = score.Compute(a.result)
+
+	analysisResult.Host = a.result.Host
+	analysisResult.Capabilities = a.result.Capabilities
+	analysisResult.Runtime = a.result
+	analysisResult.Confidence.Runtime = a.result.SelfCheck.CollectionConfidence
+	if analysisResult.Confidence.Runtime == "" {
+		analysisResult.Confidence.Runtime = "high"
+	}
+
+	// Phase 2: Retained state
+	if a.cfg.WithRetained {
+		rs, errs := a.collectRetained(ctx)
+		analysisResult.Retained = rs
+		if rs != nil {
+			analysisResult.Confidence.Retained = rs.Confidence
+		} else {
+			analysisResult.Confidence.Retained = "unavailable"
+		}
+		for _, e := range errs {
+			analysisResult.Errors = append(analysisResult.Errors, e)
+		}
+	} else {
+		analysisResult.Confidence.Retained = "unavailable"
+	}
+
+	// Phase 3: Triggerable state
+	if a.cfg.WithTriggerable {
+		ts, errs := a.collectTriggerable(ctx)
+		analysisResult.Triggerable = ts
+		if ts != nil {
+			analysisResult.Confidence.Triggerable = ts.Confidence
+		} else {
+			analysisResult.Confidence.Triggerable = "unavailable"
+		}
+		for _, e := range errs {
+			analysisResult.Errors = append(analysisResult.Errors, e)
+		}
+	} else {
+		analysisResult.Confidence.Triggerable = "unavailable"
+	}
+
+	// Phase 4: Timeline
+	if a.cfg.WithTimeline {
+		analysisResult.Timeline = timeline.Build(
+			analysisResult.Runtime,
+			analysisResult.Retained,
+			analysisResult.Triggerable,
+		)
+	}
+
+	// Phase 5: Extended scoring (retained + triggerable + cross-state)
+	score.ComputeAnalysis(analysisResult)
+
+	// Overall confidence = min of all available dimensions
+	analysisResult.Confidence.Overall = minConfidence(
+		analysisResult.Confidence.Runtime,
+		analysisResult.Confidence.Retained,
+		analysisResult.Confidence.Triggerable,
+	)
+
+	// Link back
+	a.result.Analysis = analysisResult
+
+	return report.GenerateAnalysis(a.cfg, analysisResult)
+}
+
+// RunRetained runs retained analysis with necessary runtime prerequisites.
+func (a *App) RunRetained(ctx context.Context) error {
+	a.result.StartedAt = time.Now()
+	defer a.finalize()
+
+	analysisResult := &model.AnalysisResult{
+		Version:    a.cfg.Version,
+		ToolName:   "linir",
+		AnalysisID: uuid.NewString(),
+		StartedAt:  a.result.StartedAt,
+	}
+	defer func() {
+		analysisResult.CompletedAt = time.Now()
+		analysisResult.DurationMS = analysisResult.CompletedAt.Sub(analysisResult.StartedAt).Milliseconds()
+	}()
+
+	a.runSelfCheck(ctx)
+	if err := a.runPreflight(ctx); err != nil && !a.cfg.Force {
+		return err
+	}
+	a.result.Capabilities = detectCapabilities()
+	a.collectHost(ctx)
+	a.collectProcesses(ctx)
+	a.collectPersistence(ctx)
+
+	analysisResult.Host = a.result.Host
+	analysisResult.Capabilities = a.result.Capabilities
+	analysisResult.Runtime = a.result
+	analysisResult.Confidence.Runtime = "high"
+	analysisResult.Confidence.Triggerable = "unavailable"
+
+	rs, errs := a.collectRetained(ctx)
+	analysisResult.Retained = rs
+	if rs != nil {
+		analysisResult.Confidence.Retained = rs.Confidence
+	} else {
+		analysisResult.Confidence.Retained = "unavailable"
+	}
+	for _, e := range errs {
+		analysisResult.Errors = append(analysisResult.Errors, e)
+	}
+
+	analysisResult.Confidence.Overall = minConfidence(
+		analysisResult.Confidence.Runtime,
+		analysisResult.Confidence.Retained,
+		analysisResult.Confidence.Triggerable,
+	)
+
+	a.result.Analysis = analysisResult
+	return report.GenerateAnalysis(a.cfg, analysisResult)
+}
+
+// RunTriggerable runs triggerable analysis with necessary runtime prerequisites.
+func (a *App) RunTriggerable(ctx context.Context) error {
+	a.result.StartedAt = time.Now()
+	defer a.finalize()
+
+	analysisResult := &model.AnalysisResult{
+		Version:    a.cfg.Version,
+		ToolName:   "linir",
+		AnalysisID: uuid.NewString(),
+		StartedAt:  a.result.StartedAt,
+	}
+	defer func() {
+		analysisResult.CompletedAt = time.Now()
+		analysisResult.DurationMS = analysisResult.CompletedAt.Sub(analysisResult.StartedAt).Milliseconds()
+	}()
+
+	a.runSelfCheck(ctx)
+	if err := a.runPreflight(ctx); err != nil && !a.cfg.Force {
+		return err
+	}
+	a.result.Capabilities = detectCapabilities()
+	a.collectHost(ctx)
+	a.collectPersistence(ctx)
+
+	analysisResult.Host = a.result.Host
+	analysisResult.Capabilities = a.result.Capabilities
+	analysisResult.Runtime = a.result
+	analysisResult.Confidence.Runtime = "high"
+	analysisResult.Confidence.Retained = "unavailable"
+
+	ts, errs := a.collectTriggerable(ctx)
+	analysisResult.Triggerable = ts
+	if ts != nil {
+		analysisResult.Confidence.Triggerable = ts.Confidence
+	} else {
+		analysisResult.Confidence.Triggerable = "unavailable"
+	}
+	for _, e := range errs {
+		analysisResult.Errors = append(analysisResult.Errors, e)
+	}
+
+	analysisResult.Confidence.Overall = minConfidence(
+		analysisResult.Confidence.Runtime,
+		analysisResult.Confidence.Retained,
+		analysisResult.Confidence.Triggerable,
+	)
+
+	a.result.Analysis = analysisResult
+	return report.GenerateAnalysis(a.cfg, analysisResult)
+}
+
+// RunTimeline runs all three states and generates a unified timeline.
+func (a *App) RunTimeline(ctx context.Context) error {
+	a.cfg.WithRetained = true
+	a.cfg.WithTriggerable = true
+	a.cfg.WithTimeline = true
+	return a.RunAnalysis(ctx)
+}
+
+func (a *App) collectRetained(ctx context.Context) (*model.RetainedState, []model.CollectionError) {
+	c, err := retained.NewPlatformCollector()
+	if err != nil {
+		return nil, []model.CollectionError{{Phase: "retained", Message: err.Error()}}
+	}
+	return retained.Collect(ctx, c, a.cfg.RetainedWindow, a.result.Processes, a.result.Persistence)
+}
+
+func (a *App) collectTriggerable(ctx context.Context) (*model.TriggerableState, []model.CollectionError) {
+	c, err := triggerable.NewPlatformCollector()
+	if err != nil {
+		return nil, []model.CollectionError{{Phase: "triggerable", Message: err.Error()}}
+	}
+	return triggerable.Collect(ctx, c)
+}
+
+func minConfidence(levels ...string) string {
+	ranks := map[string]int{"high": 3, "medium": 2, "low": 1}
+	min := -1 // -1 means no available dimension seen
+	for _, l := range levels {
+		if l == "unavailable" || l == "" {
+			continue
+		}
+		r := ranks[l]
+		if min < 0 || r < min {
+			min = r
+		}
+	}
+	switch min {
+	case 3:
+		return "high"
+	case 2:
+		return "medium"
+	case 1:
+		return "low"
+	default:
+		return "low" // all dimensions unavailable
+	}
 }
 
 // Result returns the collection result.

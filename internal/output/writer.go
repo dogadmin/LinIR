@@ -10,6 +10,11 @@ type Writer interface {
 	Write(result *model.CollectionResult) error
 }
 
+// AnalysisWriter writes three-state analysis results.
+type AnalysisWriter interface {
+	WriteAnalysis(result *model.AnalysisResult) error
+}
+
 // ForConfig returns the appropriate writers based on configuration.
 // Supported formats: "json", "text", "csv", "both" (json+text), "all" (json+text+csv)
 func ForConfig(cfg *config.Config) []Writer {
@@ -26,6 +31,27 @@ func ForConfig(cfg *config.Config) []Writer {
 		writers = append(writers, NewTextWriter(cfg.OutputDir, cfg.Quiet))
 		writers = append(writers, NewCSVWriter(cfg.OutputDir))
 	default: // "both" = json + text (backward compatible)
+		writers = append(writers, NewJSONWriter(cfg.OutputDir))
+		writers = append(writers, NewTextWriter(cfg.OutputDir, cfg.Quiet))
+	}
+	return writers
+}
+
+// AnalysisWritersForConfig returns analysis-capable writers based on configuration.
+func AnalysisWritersForConfig(cfg *config.Config) []AnalysisWriter {
+	var writers []AnalysisWriter
+	switch cfg.OutputFormat {
+	case "json":
+		writers = append(writers, NewJSONWriter(cfg.OutputDir))
+	case "text":
+		writers = append(writers, NewTextWriter(cfg.OutputDir, cfg.Quiet))
+	case "csv":
+		writers = append(writers, NewCSVWriter(cfg.OutputDir))
+	case "all":
+		writers = append(writers, NewJSONWriter(cfg.OutputDir))
+		writers = append(writers, NewTextWriter(cfg.OutputDir, cfg.Quiet))
+		writers = append(writers, NewCSVWriter(cfg.OutputDir))
+	default:
 		writers = append(writers, NewJSONWriter(cfg.OutputDir))
 		writers = append(writers, NewTextWriter(cfg.OutputDir, cfg.Quiet))
 	}

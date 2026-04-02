@@ -9,14 +9,16 @@ import (
 
 // LaunchItem represents a parsed LaunchAgent/LaunchDaemon plist.
 type LaunchItem struct {
-	Label            string   `plist:"Label"`
-	ProgramArguments []string `plist:"ProgramArguments"`
-	Program          string   `plist:"Program"`
-	RunAtLoad        bool     `plist:"RunAtLoad"`
-	KeepAlive        interface{} `plist:"KeepAlive"` // can be bool or dict
-	Disabled         bool     `plist:"Disabled"`
-	UserName         string   `plist:"UserName"`
-	WatchPaths       []string `plist:"WatchPaths"`
+	Label                 string      `plist:"Label"`
+	ProgramArguments      []string    `plist:"ProgramArguments"`
+	Program               string      `plist:"Program"`
+	RunAtLoad             bool        `plist:"RunAtLoad"`
+	KeepAlive             interface{} `plist:"KeepAlive"` // can be bool or dict
+	Disabled              bool        `plist:"Disabled"`
+	UserName              string      `plist:"UserName"`
+	WatchPaths            []string    `plist:"WatchPaths"`
+	StartInterval         int         `plist:"StartInterval"`
+	StartCalendarInterval interface{} `plist:"StartCalendarInterval"` // can be dict or array of dicts
 }
 
 // ParseLaunchPlist parses a LaunchAgent/LaunchDaemon plist file.

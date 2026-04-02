@@ -1,5 +1,18 @@
 // LinIR GUI - 前端逻辑
 let resultData = null;
+let analysisData = null;
+let apiToken = window.__LINIR_TOKEN__ || '';
+
+function authHeaders(extra) {
+  const h = { 'Authorization': 'Bearer ' + apiToken };
+  if (extra) Object.assign(h, extra);
+  return h;
+}
+
+function authURL(url) {
+  const sep = url.includes('?') ? '&' : '?';
+  return url + sep + 'token=' + encodeURIComponent(apiToken);
+}
 
 // ========== 采集控制 ==========
 
@@ -15,7 +28,7 @@ async function startCollect() {
     const body = yaraRules ? JSON.stringify({ yara_rules: yaraRules }) : '{}';
     const resp = await fetch('/api/collect', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: authHeaders({ 'Content-Type': 'application/json' }),
       body: body,
     });
     if (!resp.ok) throw new Error(await resp.text());
@@ -23,7 +36,7 @@ async function startCollect() {
     renderAll(resultData);
     status.className = 'badge badge-done';
     status.textContent = '采集完成';
-    document.getElementById('btn-export').disabled = false;
+    enableExportButtons();
   } catch (e) {
     status.className = 'badge badge-error';
     status.textContent = '采集失败';
@@ -34,20 +47,45 @@ async function startCollect() {
 }
 
 function exportJSON() {
-  if (!resultData) return;
-  const blob = new Blob([JSON.stringify(resultData, null, 2)], { type: 'application/json' });
+  const data = analysisData || resultData;
+  if (!data) return;
+  const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
   const url = URL.createObjectURL(blob);
   const a = document.createElement('a');
   a.href = url;
-  a.download = 'linir-' + (resultData.host?.hostname || 'report') + '.json';
+  const hostname = data.host?.hostname || resultData?.host?.hostname || 'report';
+  a.download = 'linir-' + hostname + '.json';
   a.click();
   URL.revokeObjectURL(url);
+}
+
+async function exportCSV() {
+  try {
+    const resp = await fetch('/api/export/csv', { headers: authHeaders() });
+    if (!resp.ok) throw new Error(await resp.text());
+    const blob = await resp.blob();
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    const disposition = resp.headers.get('Content-Disposition') || '';
+    const match = disposition.match(/filename="?([^"]+)"?/);
+    a.download = match ? match[1] : 'linir-csv.zip';
+    a.click();
+    URL.revokeObjectURL(url);
+  } catch (e) {
+    alert('CSV 导出失败: ' + e.message);
+  }
+}
+
+function enableExportButtons() {
+  document.getElementById('btn-export').disabled = false;
+  document.getElementById('btn-export-csv').disabled = false;
 }
 
 // 页面加载时检查是否已有数据
 window.addEventListener('load', async () => {
   try {
-    const resp = await fetch('/api/result');
+    const resp = await fetch('/api/result', { headers: authHeaders() });
     if (resp.ok) {
       const data = await resp.json();
       if (data && data.version) {
@@ -55,7 +93,7 @@ window.addEventListener('load', async () => {
         renderAll(data);
         document.getElementById('status').className = 'badge badge-done';
         document.getElementById('status').textContent = '已有数据';
-        document.getElementById('btn-export').disabled = false;
+        enableExportButtons();
       }
     }
   } catch (_) {}
@@ -121,7 +159,7 @@ function renderEvidence(score) {
     const tr = document.createElement('tr');
     tr.className = hasDetails ? 'evidence-expandable' : '';
     tr.innerHTML = `
-      <td><span class="sev-${e.severity}">${e.severity.toUpperCase()}</span></td>
+      <td><span class="sev-${esc(e.severity)}">${e.severity.toUpperCase()}</span></td>
       <td>${esc(e.domain)}</td>
       <td><code>${esc(e.rule)}</code></td>
       <td>${esc(e.description)} ${hasDetails ? '<span class="evidence-chevron">&#9654;</span>' : ''}</td>
@@ -370,7 +408,7 @@ async function startWatch() {
   try {
     const resp = await fetch('/api/watch/start', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: authHeaders({ 'Content-Type': 'application/json' }),
       body: JSON.stringify({ iocs: iocsText, interval: interval, yara_rules: yaraRules, iface: iface }),
     });
     if (!resp.ok) throw new Error(await resp.text());
@@ -391,7 +429,7 @@ async function startWatch() {
 
 async function stopWatch() {
   try {
-    await fetch('/api/watch/stop', { method: 'POST' });
+    await fetch('/api/watch/stop', { method: 'POST', headers: authHeaders() });
   } catch (_) {}
   if (watchEventSource) { watchEventSource.close(); watchEventSource = null; }
   document.getElementById('btn-watch-start').disabled = false;
@@ -401,7 +439,7 @@ async function stopWatch() {
 
 function startWatchStream() {
   if (watchEventSource) watchEventSource.close();
-  watchEventSource = new EventSource('/api/watch/stream');
+  watchEventSource = new EventSource(authURL('/api/watch/stream'));
 
   watchEventSource.onmessage = function(e) {
     try {
@@ -462,7 +500,7 @@ function appendWatchEvent(evt) {
 
   tr.innerHTML = `
     <td>${esc(time)}</td>
-    <td><span class="sev-${evt.severity}">${(evt.severity||'').toUpperCase()}</span></td>
+    <td><span class="sev-${esc(evt.severity)}">${(evt.severity||'').toUpperCase()}</span></td>
     <td><strong>${esc(evt.ioc?.value)}</strong></td>
     <td>${pid}${resolveTag}</td>
     <td>${esc(proc)}</td>
@@ -487,7 +525,7 @@ async function runYaraScan() {
   try {
     const resp = await fetch('/api/yara/scan', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: authHeaders({ 'Content-Type': 'application/json' }),
       body: JSON.stringify({ rules_path: rulesPath }),
     });
     if (!resp.ok) throw new Error(await resp.text());
@@ -518,10 +556,367 @@ function renderYaraHits(hits) {
       <td>${esc(h.target_type || 'file')}</td>
       <td>${h.linked_pid || '—'}</td>
       <td>${(h.strings || []).map(s => '<code>' + esc(s) + '</code>').join(' ')}</td>
-      <td><span class="sev-${sev}">${sev.toUpperCase()}</span></td>`;
+      <td><span class="sev-${esc(sev)}">${sev.toUpperCase()}</span></td>`;
     tbody.appendChild(tr);
   });
 }
+
+// ========== 三维分析 ==========
+
+async function startAnalysis() {
+  const btn = document.getElementById('btn-analysis');
+  const status = document.getElementById('status');
+  btn.disabled = true;
+  status.className = 'badge badge-running';
+  status.textContent = '三维分析中...';
+
+  try {
+    const yaraRules = (document.getElementById('yara-rules-path').value || '').trim();
+    const body = {
+      with_retained: true,
+      with_triggerable: true,
+      timeline: true,
+    };
+    if (yaraRules) body.yara_rules = yaraRules;
+
+    const resp = await fetch('/api/analysis', {
+      method: 'POST',
+      headers: authHeaders({ 'Content-Type': 'application/json' }),
+      body: JSON.stringify(body),
+    });
+    if (!resp.ok) throw new Error(await resp.text());
+    analysisData = await resp.json();
+
+    // Render runtime part using existing functions
+    if (analysisData.runtime) {
+      resultData = analysisData.runtime;
+      renderAll(resultData);
+    }
+
+    // Render three-state panels
+    renderRetained(analysisData.retained);
+    renderTriggerable(analysisData.triggerable);
+    renderTimeline(analysisData.timeline);
+
+    status.className = 'badge badge-done';
+    status.textContent = '分析完成';
+    enableExportButtons();
+  } catch (e) {
+    status.className = 'badge badge-error';
+    status.textContent = '分析失败';
+    alert('分析失败: ' + e.message);
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+function renderRetained(r) {
+  const el = document.getElementById('retained-content');
+  if (!r) { el.innerHTML = '<p class="muted">未采集</p>'; return; }
+
+  let html = `<div class="integrity-group"><h3>概况</h3>
+    <div class="integrity-item">时间窗口: <strong>${esc(r.window)}</strong></div>
+    <div class="integrity-item">可信度: <strong>${esc(r.confidence)}</strong></div>
+  </div>`;
+
+  // File timeline
+  if (r.file_timeline && r.file_timeline.length > 0) {
+    html += `<div class="integrity-group"><h3>文件时间线 (${r.file_timeline.length})</h3>`;
+    html += '<div class="table-wrap" style="max-height:300px;overflow:auto"><table><thead><tr><th>路径</th><th>修改时间</th><th>大小</th><th>权限</th><th>关键目录</th><th>标记</th></tr></thead><tbody>';
+    r.file_timeline.forEach(f => {
+      const flags = (f.risk_flags || []);
+      const cls = flags.length > 0 ? ' class="suspicious"' : '';
+      html += `<tr${cls}>
+        <td title="${esc(f.path)}">${esc(f.path)}</td>
+        <td>${new Date(f.mod_time).toLocaleString()}</td>
+        <td>${f.size}</td>
+        <td>${esc(f.mode)}</td>
+        <td>${esc(f.key_dir)}</td>
+        <td>${flags.map(f => tagHTML(f)).join(' ')}</td></tr>`;
+    });
+    html += '</tbody></table></div></div>';
+  }
+
+  // Persistence changes
+  if (r.persistence_changes && r.persistence_changes.length > 0) {
+    html += `<div class="integrity-group"><h3>持久化变更 (${r.persistence_changes.length})</h3>`;
+    r.persistence_changes.forEach(c => {
+      const flags = (c.risk_flags || []).map(f => tagHTML(f)).join(' ');
+      html += `<div class="integrity-item warn"><strong>[${esc(c.change_type)}]</strong> ${esc(c.type)} ${esc(c.path)} → ${esc(c.target)} ${flags}</div>`;
+    });
+    html += '</div>';
+  }
+
+  // Artifacts
+  if (r.artifacts && r.artifacts.length > 0) {
+    html += `<div class="integrity-group"><h3>残留痕迹 (${r.artifacts.length})</h3>`;
+    r.artifacts.forEach(a => {
+      const cls = a.type === 'deleted_exe' ? 'danger' : 'warn';
+      html += `<div class="integrity-item ${cls}"><strong>[${esc(a.type)}]</strong> ${esc(a.path)} — ${esc(a.reason)}</div>`;
+    });
+    html += '</div>';
+  }
+
+  // Auth history
+  if (r.auth_history && r.auth_history.length > 0) {
+    html += `<div class="integrity-group"><h3>认证历史 (${r.auth_history.length})</h3>`;
+    html += '<div class="table-wrap" style="max-height:300px;overflow:auto"><table><thead><tr><th>时间</th><th>类型</th><th>用户</th><th>来源IP</th><th>成功</th></tr></thead><tbody>';
+    r.auth_history.forEach(e => {
+      const cls = !e.success ? ' class="suspicious"' : '';
+      html += `<tr${cls}>
+        <td>${new Date(e.time).toLocaleString()}</td>
+        <td>${esc(e.type)}</td>
+        <td>${esc(e.user)}</td>
+        <td>${esc(e.remote_ip || '—')}</td>
+        <td>${e.success ? '✓' : '✗'}</td></tr>`;
+    });
+    html += '</tbody></table></div></div>';
+  }
+
+  // Log events
+  if (r.log_events && r.log_events.length > 0) {
+    html += `<div class="integrity-group"><h3>日志事件 (${r.log_events.length})</h3>`;
+    html += '<div class="table-wrap" style="max-height:300px;overflow:auto"><table><thead><tr><th>时间</th><th>进程</th><th>严重度</th><th>消息</th></tr></thead><tbody>';
+    r.log_events.slice(0, 200).forEach(e => {
+      const cls = e.severity === 'error' ? ' class="suspicious"' : '';
+      html += `<tr${cls}>
+        <td>${new Date(e.time).toLocaleString()}</td>
+        <td>${esc(e.process)}</td>
+        <td>${esc(e.severity)}</td>
+        <td>${esc(e.message.substring(0, 200))}</td></tr>`;
+    });
+    html += '</tbody></table></div></div>';
+  }
+
+  el.innerHTML = html || '<p class="muted">无历史残留数据</p>';
+}
+
+function renderTriggerable(t) {
+  const el = document.getElementById('triggerable-content');
+  if (!t) { el.innerHTML = '<p class="muted">未采集</p>'; return; }
+
+  let html = `<div class="integrity-group"><h3>概况</h3>
+    <div class="integrity-item">可信度: <strong>${esc(t.confidence)}</strong></div>
+  </div>`;
+
+  const renderEntries = (title, entries) => {
+    if (!entries || entries.length === 0) return '';
+    let h = `<div class="integrity-group"><h3>${esc(title)} (${entries.length})</h3>`;
+    h += '<div class="table-wrap" style="max-height:300px;overflow:auto"><table><thead><tr><th>类型</th><th>路径</th><th>目标</th><th>触发条件</th><th>调度</th><th>标记</th></tr></thead><tbody>';
+    entries.forEach(e => {
+      const flags = (e.risk_flags || []);
+      const cls = flags.length > 0 ? ' class="suspicious"' : '';
+      h += `<tr${cls}>
+        <td>${tagHTML(e.type, 'blue')}</td>
+        <td title="${esc(e.path)}">${esc(e.path)}</td>
+        <td title="${esc(e.target)}">${esc(e.target)}</td>
+        <td>${esc(e.trigger_condition)}</td>
+        <td>${esc(e.schedule || e.next_fire || '—')}</td>
+        <td>${flags.map(f => tagHTML(f)).join(' ')}</td></tr>`;
+    });
+    h += '</tbody></table></div></div>';
+    return h;
+  };
+
+  html += renderEntries('自动启动项', t.autostarts);
+  html += renderEntries('定时任务', t.scheduled);
+  html += renderEntries('KeepAlive/重启机制', t.keepalive);
+
+  el.innerHTML = html;
+}
+
+let timelineData = [];
+
+function renderTimeline(events) {
+  timelineData = events || [];
+  const tbody = document.querySelector('#timeline-table tbody');
+  tbody.innerHTML = '';
+
+  if (timelineData.length === 0) {
+    tbody.innerHTML = '<tr><td colspan="6" class="muted" style="text-align:center;padding:20px">无时间线数据</td></tr>';
+    return;
+  }
+
+  renderTimelineRows(timelineData);
+}
+
+function renderTimelineRows(events) {
+  const tbody = document.querySelector('#timeline-table tbody');
+  tbody.innerHTML = '';
+
+  events.forEach(e => {
+    const tr = document.createElement('tr');
+    const sevClass = (e.severity === 'high' || e.severity === 'critical') ? 'suspicious' : '';
+    if (sevClass) tr.className = sevClass;
+
+    const scopeColors = { runtime: 'blue', retained: 'orange', triggerable: 'yellow' };
+    const timeStr = e.time_type === 'synthetic' ? e.synth_label : new Date(e.time).toLocaleString();
+
+    tr.setAttribute('data-scope', e.scope || '');
+    tr.setAttribute('data-severity', e.severity || '');
+
+    tr.innerHTML = `
+      <td>${esc(timeStr)}</td>
+      <td>${tagHTML(e.scope, scopeColors[e.scope] || 'blue')}</td>
+      <td>${esc(e.type)}</td>
+      <td title="${esc(e.object)}">${esc((e.object || '').substring(0, 60))}</td>
+      <td><span class="sev-${esc(e.severity)}">${(e.severity || '').toUpperCase()}</span></td>
+      <td>${esc((e.summary || '').substring(0, 100))}</td>`;
+    tbody.appendChild(tr);
+  });
+}
+
+function filterTimeline() {
+  const scope = document.getElementById('timeline-scope-filter').value;
+  const severity = document.getElementById('timeline-severity-filter').value;
+  const sevRank = { critical: 4, high: 3, medium: 2, low: 1, info: 0 };
+
+  const filtered = timelineData.filter(e => {
+    if (scope && e.scope !== scope) return false;
+    if (severity && (sevRank[e.severity] || 0) < (sevRank[severity] || 0)) return false;
+    return true;
+  });
+  renderTimelineRows(filtered);
+}
+
+// ========== AI 分析 ==========
+
+let aiMessages = []; // {role, content} 对话历史
+
+async function sendAIMessage() {
+  const apiKey = document.getElementById('ai-api-key').value.trim();
+  const model = document.getElementById('ai-model').value;
+  const input = document.getElementById('ai-input');
+  const message = input.value.trim();
+
+  if (!apiKey) { alert('请输入 MiniMax API Key'); return; }
+  if (!message) return;
+
+  // Add user message to UI
+  appendAIChatBubble('user', message);
+  aiMessages.push({ role: 'user', content: message });
+  if (aiMessages.length > 30) aiMessages = aiMessages.slice(-30);
+  input.value = '';
+
+  document.getElementById('ai-status').innerHTML = '<span class="badge badge-running">AI 思考中...</span>';
+
+  try {
+    const resp = await fetch('/api/ai/chat', {
+      method: 'POST',
+      headers: authHeaders({ 'Content-Type': 'application/json' }),
+      body: JSON.stringify({
+        api_key: apiKey,
+        model: model,
+        messages: aiMessages,
+      }),
+    });
+    if (!resp.ok) throw new Error(await resp.text());
+    const data = await resp.json();
+
+    appendAIChatBubble('assistant', data.reply);
+    aiMessages.push({ role: 'assistant', content: data.reply });
+    if (aiMessages.length > 30) aiMessages = aiMessages.slice(-30);
+
+    document.getElementById('ai-status').innerHTML = '';
+  } catch (e) {
+    document.getElementById('ai-status').innerHTML = `<span class="badge badge-error">错误: ${esc(e.message)}</span>`;
+  }
+}
+
+async function runAIAnalyze() {
+  const apiKey = document.getElementById('ai-api-key').value.trim();
+  const model = document.getElementById('ai-model').value;
+
+  if (!apiKey) { alert('请输入 MiniMax API Key'); return; }
+
+  const userPrompt = '综合分析这台主机的安全状态（一键分析）';
+  appendAIChatBubble('user', userPrompt);
+  aiMessages.push({ role: 'user', content: userPrompt });
+  document.getElementById('ai-status').innerHTML = '<span class="badge badge-running">AI 综合分析中，请稍候...</span>';
+
+  try {
+    const resp = await fetch('/api/ai/analyze', {
+      method: 'POST',
+      headers: authHeaders({ 'Content-Type': 'application/json' }),
+      body: JSON.stringify({ api_key: apiKey, model: model }),
+    });
+    if (!resp.ok) throw new Error(await resp.text());
+    const data = await resp.json();
+
+    appendAIChatBubble('assistant', data.reply);
+    aiMessages.push({ role: 'assistant', content: data.reply });
+    if (aiMessages.length > 30) aiMessages = aiMessages.slice(-30);
+
+    document.getElementById('ai-status').innerHTML = '<span class="badge badge-done">分析完成</span>';
+  } catch (e) {
+    document.getElementById('ai-status').innerHTML = `<span class="badge badge-error">分析失败: ${esc(e.message)}</span>`;
+  }
+}
+
+const aiPresets = {
+  '入侵判定': '基于采集数据，判断这台主机是否被入侵。直接给结论（是/否/疑似），列出关键依据。',
+  '后门排查': '排查是否存在后门。重点检查：异常持久化项、可疑自启动服务、异常 cron 任务、SSH authorized_keys 异常、隐藏进程。直接列出发现。',
+  '横向移动': '分析是否存在横向移动迹象。检查：异常 SSH 连接、内网扫描行为、异常认证记录、可疑网络连接。',
+  '数据外泄': '分析是否存在数据外泄风险。检查：异常外联连接、可疑传输行为、异常进程网络活动、DNS 隧道迹象。',
+  '持久化分析': '深入分析所有持久化机制。对每个有风险标记的持久化项给出判断：是否恶意、风险等级、建议处置方式。',
+  '处置建议': '基于当前发现，给出完整的应急处置方案。包括：立即处置步骤、需要保全的证据、后续加固建议。按优先级排序。',
+};
+
+function aiPreset(name) {
+  const prompt = aiPresets[name];
+  if (!prompt) return;
+  document.getElementById('ai-input').value = prompt;
+  sendAIMessage();
+}
+
+function clearAIChat() {
+  aiMessages = [];
+  document.getElementById('ai-messages').innerHTML = '';
+  document.getElementById('ai-status').innerHTML = '';
+}
+
+function appendAIChatBubble(role, content) {
+  const container = document.getElementById('ai-messages');
+  const div = document.createElement('div');
+
+  if (role === 'user') {
+    div.style.cssText = 'margin-bottom:12px;padding:8px 12px;background:var(--bg3);border-radius:6px;color:var(--text);white-space:pre-wrap;word-break:break-word;';
+    div.innerHTML = '<strong style="color:var(--accent)">You:</strong> ' + esc(content);
+  } else {
+    div.style.cssText = 'margin-bottom:12px;padding:8px 12px;background:rgba(79,140,255,.08);border-left:3px solid var(--accent);border-radius:6px;color:var(--text);white-space:pre-wrap;word-break:break-word;';
+    div.innerHTML = '<strong style="color:var(--green)">AI:</strong> ' + renderAIMarkdown(content);
+  }
+
+  container.appendChild(div);
+  container.scrollTop = container.scrollHeight;
+}
+
+function renderAIMarkdown(text) {
+  // Simple markdown: **bold**, `code`, ```block```, headers, lists
+  let html = esc(text);
+  // Code blocks
+  html = html.replace(/```([\s\S]*?)```/g, '<pre style="background:var(--bg);padding:8px;border-radius:4px;overflow-x:auto;margin:8px 0">$1</pre>');
+  // Inline code
+  html = html.replace(/`([^`]+)`/g, '<code style="background:var(--bg);padding:2px 4px;border-radius:3px">$1</code>');
+  // Bold
+  html = html.replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>');
+  // Headers
+  html = html.replace(/^### (.+)$/gm, '<strong style="font-size:14px;color:var(--accent)">$1</strong>');
+  html = html.replace(/^## (.+)$/gm, '<strong style="font-size:15px;color:var(--accent)">$1</strong>');
+  html = html.replace(/^# (.+)$/gm, '<strong style="font-size:16px;color:var(--accent)">$1</strong>');
+  // List items
+  html = html.replace(/^- (.+)$/gm, '&bull; $1');
+  html = html.replace(/^\d+\. (.+)$/gm, '<span style="color:var(--accent)">$&</span>');
+  return html;
+}
+
+// Enter key sends message
+document.addEventListener('keydown', function(e) {
+  if (e.target.id === 'ai-input' && e.key === 'Enter' && !e.shiftKey) {
+    e.preventDefault();
+    sendAIMessage();
+  }
+});
 
 // ========== 文件浏览器 ==========
 
@@ -536,7 +931,7 @@ async function openFileBrowser(inputId) {
     fbCurrentPath = currentVal;
   } else if (!fbCwdLoaded) {
     try {
-      const resp = await fetch('/api/fs/cwd');
+      const resp = await fetch('/api/fs/cwd', { headers: authHeaders() });
       const data = await resp.json();
       if (data.cwd) fbCurrentPath = data.cwd;
       fbCwdLoaded = true;
@@ -557,7 +952,7 @@ async function fbNavigate(path) {
   el.innerHTML = '<p class="muted">加载中...</p>';
 
   try {
-    const resp = await fetch('/api/fs/browse?path=' + encodeURIComponent(path));
+    const resp = await fetch(authURL('/api/fs/browse?path=' + encodeURIComponent(path)));
     if (!resp.ok) throw new Error(await resp.text());
     const data = await resp.json();
     fbCurrentPath = data.path;

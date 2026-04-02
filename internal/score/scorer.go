@@ -193,7 +193,8 @@ func scoreProcesses(sr *model.ScoreResult, procs []model.ProcessInfo, ctx *scori
 				}
 
 			case "fake_kernel_thread":
-				addEvidence(sr, "process", RuleFakeKthread, fmt.Sprintf("PID %d (%s) 伪装内核线程", p.PID, p.Name), 10, "medium", d)
+				// 单独的名称伪装只给低分，需联网才升级
+				addEvidence(sr, "process", RuleFakeKthread, fmt.Sprintf("PID %d (%s) 伪装内核线程", p.PID, p.Name), 5, "low", d)
 				if networked {
 					addEvidence(sr, "process", RuleFakeKthreadNetworked, fmt.Sprintf("PID %d (%s) 伪内核线程且联网", p.PID, p.Name), 10, "high", d)
 				}
@@ -229,7 +230,7 @@ func scoreNetwork(sr *model.ScoreResult, conns []model.ConnectionInfo) {
 			}
 		}
 	}
-	if orphanCount > 3 {
+	if orphanCount > 10 {
 		addIntegrityFlag(sr, fmt.Sprintf("orphan_active_connections:%d", orphanCount))
 		downgradeConfidence(sr, "medium", fmt.Sprintf("%d 个无归属活跃连接", orphanCount))
 	}

@@ -162,46 +162,40 @@ func parseLaunchPlist(path, scope string) *model.PersistenceItem {
 func flagLaunchRisks(item *model.PersistenceItem, plist *plistutil.LaunchItem, scope string) {
 	target := item.Target
 
-	// 目标在临时目录
+	// 目标在临时目录——明确可疑
 	if strings.HasPrefix(target, "/tmp/") || strings.HasPrefix(target, "/private/tmp/") ||
 		strings.HasPrefix(target, "/var/tmp/") {
 		item.RiskFlags = append(item.RiskFlags, "target_in_tmp")
 	}
 
-	// 目标不存在
+	// 目标不存在——可疑（残留或被删除）
 	if target != "" {
 		if _, err := os.Stat(target); err != nil {
 			item.RiskFlags = append(item.RiskFlags, "target_missing")
 		}
 	}
 
-	// RunAtLoad 且在非 Apple 目录（第三方自启动）
-	if plist.RunAtLoad && !strings.HasPrefix(item.Path, "/System/Library/") {
-		item.RiskFlags = append(item.RiskFlags, "third_party_run_at_load")
-	}
-
-	// 用户目录下的 LaunchAgent 伪装系统名称
+	// 用户目录下的 LaunchAgent 伪装 Apple 系统名称——明确可疑
 	if scope == "user" {
 		if strings.HasPrefix(plist.Label, "com.apple.") {
 			item.RiskFlags = append(item.RiskFlags, "impersonates_apple")
 		}
 	}
 
-	// 命令参数中的可疑模式
-	fullArgs := strings.Join(plist.ProgramArguments, " ")
-	if strings.Contains(fullArgs, "curl ") || strings.Contains(fullArgs, "wget ") {
-		item.RiskFlags = append(item.RiskFlags, "downloads_from_network")
-	}
-	if strings.Contains(fullArgs, "base64") {
-		item.RiskFlags = append(item.RiskFlags, "base64_usage")
-	}
-	if strings.Contains(fullArgs, "osascript") {
-		item.RiskFlags = append(item.RiskFlags, "applescript_exec")
-	}
+	// 仅标记真正高置信度的恶意模式，不标记正常行为：
+	// - third_party_run_at_load: 删除（几乎所有第三方 app 都有）
+	// - shell_exec: 删除（shell 作为入口是正常的脚本调用方式）
+	// - downloads_from_network: 删除（curl/wget 在 args 中很常见）
+	// - base64_usage: 删除（合法工具常用）
+	// - applescript_exec: 删除（macOS 标准 API）
+	// - command_alias_override: 已经在 profile 部分删除
 
-	// 使用 bash/sh -c 执行（可能是为了执行复杂命令链）
-	if target == "/bin/bash" || target == "/bin/sh" || target == "/bin/zsh" {
-		item.RiskFlags = append(item.RiskFlags, "shell_exec")
+	// 保留：curl/wget 管道到 shell 执行——这才是真正可疑的
+	fullArgs := strings.Join(plist.ProgramArguments, " ")
+	if (strings.Contains(fullArgs, "curl ") || strings.Contains(fullArgs, "wget ")) &&
+		(strings.Contains(fullArgs, "| bash") || strings.Contains(fullArgs, "| sh") ||
+			strings.Contains(fullArgs, "|bash") || strings.Contains(fullArgs, "|sh")) {
+		item.RiskFlags = append(item.RiskFlags, "pipe_to_shell")
 	}
 }
 
@@ -248,20 +242,14 @@ func checkMacProfileFile(path, scope string) *model.PersistenceItem {
 		Confidence: "high",
 	}
 
+	// 仅标记高置信度恶意指标，不标记正常 shell 行为
+	// base64/eval/curl/wget/osascript/alias 在正常 profile 中极为常见
 	patterns := []struct {
 		substr string
 		flag   string
 	}{
 		{"DYLD_INSERT_LIBRARIES", "dyld_inject_export"},
-		{"DYLD_LIBRARY_PATH", "dyld_path_override"},
 		{"/dev/tcp/", "dev_tcp_reverse_shell"},
-		{"base64", "base64_usage"},
-		{"eval ", "eval_usage"},
-		{"curl ", "network_download"},
-		{"wget ", "network_download"},
-		{"osascript", "applescript_exec"},
-		{"alias ps=", "command_alias_override"},
-		{"alias ls=", "command_alias_override"},
 	}
 
 	for _, p := range patterns {

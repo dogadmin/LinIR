@@ -1,10 +1,16 @@
 package web
 
 import (
+	"archive/zip"
+	"bytes"
 	"context"
+	"crypto/rand"
+	"crypto/subtle"
 	"embed"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"io"
 	"io/fs"
 	"log"
 	"net"
@@ -17,14 +23,21 @@ import (
 	"sync"
 	"time"
 
+	"github.com/dogadmin/LinIR/internal/ai"
 	"github.com/dogadmin/LinIR/internal/app"
 	"github.com/dogadmin/LinIR/internal/collector"
 	"github.com/dogadmin/LinIR/internal/config"
 	"github.com/dogadmin/LinIR/internal/model"
+	"github.com/dogadmin/LinIR/internal/output"
 	"github.com/dogadmin/LinIR/internal/preflight"
 	"github.com/dogadmin/LinIR/internal/selfcheck"
 	"github.com/dogadmin/LinIR/internal/watch"
 	"github.com/dogadmin/LinIR/internal/yara"
+)
+
+const (
+	maxRequestBody = 1 << 20 // 1 MB
+	maxWatchEvents = 10000
 )
 
 //go:embed ui/*
@@ -35,7 +48,9 @@ type Server struct {
 	cfg        *config.Config
 	host       string
 	port       int
+	token      string // bearer token for API auth
 	result     *model.CollectionResult
+	analysis   *model.AnalysisResult
 	mu         sync.Mutex
 	collecting bool
 
@@ -51,7 +66,15 @@ type Server struct {
 }
 
 func NewServer(cfg *config.Config, host string, port int) *Server {
-	return &Server{cfg: cfg, host: host, port: port}
+	return &Server{cfg: cfg, host: host, port: port, token: generateToken()}
+}
+
+func generateToken() string {
+	b := make([]byte, 16)
+	if _, err := rand.Read(b); err != nil {
+		return "linir-fallback-token"
+	}
+	return hex.EncodeToString(b)
 }
 
 func (s *Server) Start() error {
@@ -61,23 +84,61 @@ func (s *Server) Start() error {
 	if err != nil {
 		return fmt.Errorf("加载 UI 资源: %w", err)
 	}
-	mux.Handle("/", http.FileServer(http.FS(uiContent)))
+
+	// Static UI — index.html is served with token injected; other files served as-is
+	staticFS := http.FileServer(http.FS(uiContent))
+	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		// Inject token into index.html so the frontend can authenticate API calls
+		if r.URL.Path == "/" || r.URL.Path == "/index.html" {
+			indexData, err := fs.ReadFile(uiContent, "index.html")
+			if err != nil {
+				http.Error(w, "内部错误", http.StatusInternalServerError)
+				return
+			}
+			// Insert a script tag with the token before </head>
+			tokenScript := fmt.Sprintf(`<script>window.__LINIR_TOKEN__="%s";</script></head>`, s.token)
+			html := strings.Replace(string(indexData), "</head>", tokenScript, 1)
+			w.Header().Set("Content-Type", "text/html; charset=utf-8")
+			w.Write([]byte(html))
+			return
+		}
+		staticFS.ServeHTTP(w, r)
+	})
+
+	// All API routes require bearer token
+	api := func(handler http.HandlerFunc) http.HandlerFunc {
+		return s.requireAuth(handler)
+	}
 
 	// collect API
-	mux.HandleFunc("/api/collect", s.handleCollect)
-	mux.HandleFunc("/api/result", s.handleResult)
-	mux.HandleFunc("/api/status", s.handleStatus)
+	mux.HandleFunc("/api/collect", api(s.handleCollect))
+	mux.HandleFunc("/api/result", api(s.handleResult))
+	mux.HandleFunc("/api/status", api(s.handleStatus))
 
 	// watch API
-	mux.HandleFunc("/api/watch/start", s.handleWatchStart)
-	mux.HandleFunc("/api/watch/stop", s.handleWatchStop)
-	mux.HandleFunc("/api/watch/events", s.handleWatchEvents)
-	mux.HandleFunc("/api/watch/stream", s.handleWatchStream)
+	mux.HandleFunc("/api/watch/start", api(s.handleWatchStart))
+	mux.HandleFunc("/api/watch/stop", api(s.handleWatchStop))
+	mux.HandleFunc("/api/watch/events", api(s.handleWatchEvents))
+	mux.HandleFunc("/api/watch/stream", api(s.handleWatchStream))
+
+	// export API
+	mux.HandleFunc("/api/export/csv", api(s.handleExportCSV))
+
+	// analysis API (three-state)
+	mux.HandleFunc("/api/analysis", api(s.handleAnalysis))
+	mux.HandleFunc("/api/analysis/result", api(s.handleAnalysisResult))
+	mux.HandleFunc("/api/analysis/retained", api(s.handleAnalysisRetained))
+	mux.HandleFunc("/api/analysis/triggerable", api(s.handleAnalysisTriggerable))
+	mux.HandleFunc("/api/analysis/timeline", api(s.handleAnalysisTimeline))
+
+	// AI 分析 API
+	mux.HandleFunc("/api/ai/chat", api(s.handleAIChat))
+	mux.HandleFunc("/api/ai/analyze", api(s.handleAIAnalyze))
 
 	// YARA + 文件浏览 API
-	mux.HandleFunc("/api/fs/browse", s.handleFsBrowse)
-	mux.HandleFunc("/api/fs/cwd", s.handleCwd)
-	mux.HandleFunc("/api/yara/scan", s.handleYaraScan)
+	mux.HandleFunc("/api/fs/browse", api(s.handleFsBrowse))
+	mux.HandleFunc("/api/fs/cwd", api(s.handleCwd))
+	mux.HandleFunc("/api/yara/scan", api(s.handleYaraScan))
 
 	addr := fmt.Sprintf("%s:%d", s.host, s.port)
 	listener, err := net.Listen("tcp", addr)
@@ -87,12 +148,33 @@ func (s *Server) Start() error {
 
 	url := fmt.Sprintf("http://%s", addr)
 	fmt.Printf("LinIR GUI 已启动: %s\n", url)
+	fmt.Printf("API Token: %s\n", s.token)
 	fmt.Println("在浏览器中打开上方地址，或按 Ctrl+C 退出")
 
 	go openBrowser(url)
 
 	return http.Serve(listener, mux)
 }
+
+// requireAuth validates the bearer token on API requests.
+// Accepts token via Authorization header or ?token= query parameter.
+func (s *Server) requireAuth(next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		token := ""
+		if auth := r.Header.Get("Authorization"); strings.HasPrefix(auth, "Bearer ") {
+			token = strings.TrimPrefix(auth, "Bearer ")
+		}
+		if token == "" {
+			token = r.URL.Query().Get("token")
+		}
+		if subtle.ConstantTimeCompare([]byte(token), []byte(s.token)) != 1 {
+			http.Error(w, "未授权访问", http.StatusUnauthorized)
+			return
+		}
+		next(w, r)
+	}
+}
+
 
 // ========== Collect API ==========
 
@@ -120,6 +202,7 @@ func (s *Server) handleCollect(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(r.Context(), time.Duration(s.cfg.Timeout)*time.Second)
 	defer cancel()
 
+	r.Body = http.MaxBytesReader(w, r.Body, maxRequestBody)
 	yaraRules := ""
 	if strings.HasPrefix(r.Header.Get("Content-Type"), "application/json") {
 		var body struct {
@@ -180,10 +263,11 @@ func (s *Server) handleResult(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 	s.mu.Lock()
 	status := map[string]interface{}{
-		"collecting":   s.collecting,
-		"has_result":   s.result != nil,
-		"watching":     s.watching,
-		"watch_events": len(s.watchEvents),
+		"collecting":    s.collecting,
+		"has_result":    s.result != nil,
+		"has_analysis":  s.analysis != nil,
+		"watching":      s.watching,
+		"watch_events":  len(s.watchEvents),
 	}
 	s.mu.Unlock()
 
@@ -217,6 +301,7 @@ func (s *Server) handleWatchStart(w http.ResponseWriter, r *http.Request) {
 		s.mu.Unlock()
 	}
 
+	r.Body = http.MaxBytesReader(w, r.Body, maxRequestBody)
 	var body struct {
 		IOCs      string `json:"iocs"`
 		Interval  int    `json:"interval"`
@@ -320,7 +405,9 @@ func (s *Server) handleWatchStart(w http.ResponseWriter, r *http.Request) {
 				}
 			}
 			if !replaced {
-				s.watchEvents = append(s.watchEvents, evt)
+				if len(s.watchEvents) < maxWatchEvents {
+					s.watchEvents = append(s.watchEvents, evt)
+				}
 			}
 			s.mu.Unlock()
 		}
@@ -540,6 +627,339 @@ func (s *Server) handleWatchStream(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+// ========== Export API ==========
+
+// handleExportCSV 将当前数据导出为 CSV（打包成 zip 下载）
+func (s *Server) handleExportCSV(w http.ResponseWriter, r *http.Request) {
+	s.mu.Lock()
+	result := s.result
+	analysis := s.analysis
+	s.mu.Unlock()
+
+	if result == nil && analysis == nil {
+		http.Error(w, "无数据可导出，请先执行采集或分析", http.StatusBadRequest)
+		return
+	}
+
+	// 写 CSV 到临时目录
+	tmpDir, err := os.MkdirTemp("", "linir-csv-*")
+	if err != nil {
+		http.Error(w, "创建临时目录失败", http.StatusInternalServerError)
+		return
+	}
+	defer os.RemoveAll(tmpDir)
+
+	csvWriter := output.NewCSVWriter(tmpDir)
+
+	if analysis != nil {
+		if err := csvWriter.WriteAnalysis(analysis); err != nil {
+			http.Error(w, "生成 CSV 失败: "+err.Error(), http.StatusInternalServerError)
+			return
+		}
+	} else if result != nil {
+		if err := csvWriter.Write(result); err != nil {
+			http.Error(w, "生成 CSV 失败: "+err.Error(), http.StatusInternalServerError)
+			return
+		}
+	}
+
+	// 收集生成的 CSV 文件
+	csvFiles, err := os.ReadDir(tmpDir)
+	if err != nil || len(csvFiles) == 0 {
+		http.Error(w, "未生成任何 CSV 文件", http.StatusInternalServerError)
+		return
+	}
+
+	// 打包成 zip 返回
+	hostname := "unknown"
+	if result != nil && result.Host.Hostname != "" {
+		hostname = result.Host.Hostname
+	} else if analysis != nil && analysis.Host.Hostname != "" {
+		hostname = analysis.Host.Hostname
+	}
+
+	// Build zip in memory to detect errors before sending headers
+	var buf bytes.Buffer
+	zw := zip.NewWriter(&buf)
+
+	for _, entry := range csvFiles {
+		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".csv") {
+			continue
+		}
+		filePath := filepath.Join(tmpDir, entry.Name())
+		f, err := os.Open(filePath)
+		if err != nil {
+			continue
+		}
+		zf, err := zw.Create(entry.Name())
+		if err != nil {
+			f.Close()
+			continue
+		}
+		io.Copy(zf, f)
+		f.Close()
+	}
+
+	if err := zw.Close(); err != nil {
+		http.Error(w, "生成 ZIP 失败: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	zipName := fmt.Sprintf("linir-csv-%s.zip", hostname)
+	w.Header().Set("Content-Type", "application/zip")
+	w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=%q", zipName))
+	w.Header().Set("Content-Length", fmt.Sprintf("%d", buf.Len()))
+	io.Copy(w, &buf)
+}
+
+// ========== Analysis API (三维状态) ==========
+
+// handleAnalysis 执行三维状态分析（runtime + retained + triggerable + timeline）
+func (s *Server) handleAnalysis(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "需要 POST 方法", http.StatusMethodNotAllowed)
+		return
+	}
+
+	s.mu.Lock()
+	if s.collecting {
+		s.mu.Unlock()
+		http.Error(w, "采集正在进行中", http.StatusConflict)
+		return
+	}
+	s.collecting = true
+	s.mu.Unlock()
+
+	defer func() {
+		s.mu.Lock()
+		s.collecting = false
+		s.mu.Unlock()
+	}()
+
+	r.Body = http.MaxBytesReader(w, r.Body, maxRequestBody)
+	var body struct {
+		WithRetained    bool   `json:"with_retained"`
+		WithTriggerable bool   `json:"with_triggerable"`
+		WithTimeline    bool   `json:"timeline"`
+		RetainedWindow  string `json:"retained_window"`
+		YaraRules       string `json:"yara_rules"`
+	}
+	if strings.HasPrefix(r.Header.Get("Content-Type"), "application/json") {
+		json.NewDecoder(r.Body).Decode(&body)
+	}
+
+	// 默认全开
+	if !body.WithRetained && !body.WithTriggerable && !body.WithTimeline {
+		body.WithRetained = true
+		body.WithTriggerable = true
+		body.WithTimeline = true
+	}
+	if body.WithTimeline {
+		body.WithRetained = true
+		body.WithTriggerable = true
+	}
+
+	guiCfg := *s.cfg
+	guiCfg.OutputFormat = "json"
+	guiCfg.Quiet = true
+	guiCfg.WithRetained = body.WithRetained
+	guiCfg.WithTriggerable = body.WithTriggerable
+	guiCfg.WithTimeline = body.WithTimeline
+	if body.YaraRules != "" {
+		guiCfg.YaraRules = body.YaraRules
+	}
+	if body.RetainedWindow != "" {
+		if d, err := time.ParseDuration(body.RetainedWindow); err == nil {
+			guiCfg.RetainedWindow = d
+		}
+	}
+
+	ctx, cancel := context.WithTimeout(r.Context(), time.Duration(s.cfg.Timeout)*time.Second)
+	defer cancel()
+
+	application, err := app.New(&guiCfg)
+	if err != nil {
+		http.Error(w, "初始化采集器失败: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	if err := application.RunAnalysis(ctx); err != nil {
+		http.Error(w, "分析失败: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	result := application.Result()
+
+	s.mu.Lock()
+	s.result = result
+	s.analysis = result.Analysis
+	s.mu.Unlock()
+
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	if result.Analysis != nil {
+		json.NewEncoder(w).Encode(result.Analysis)
+	} else {
+		json.NewEncoder(w).Encode(result)
+	}
+}
+
+// handleAnalysisResult 返回缓存的完整分析结果
+func (s *Server) handleAnalysisResult(w http.ResponseWriter, r *http.Request) {
+	s.mu.Lock()
+	analysis := s.analysis
+	s.mu.Unlock()
+
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	if analysis == nil {
+		w.Write([]byte("null"))
+		return
+	}
+	json.NewEncoder(w).Encode(analysis)
+}
+
+// handleAnalysisRetained 返回缓存的 retained 数据
+func (s *Server) handleAnalysisRetained(w http.ResponseWriter, r *http.Request) {
+	s.mu.Lock()
+	analysis := s.analysis
+	s.mu.Unlock()
+
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	if analysis == nil || analysis.Retained == nil {
+		w.Write([]byte("null"))
+		return
+	}
+	json.NewEncoder(w).Encode(analysis.Retained)
+}
+
+// handleAnalysisTriggerable 返回缓存的 triggerable 数据
+func (s *Server) handleAnalysisTriggerable(w http.ResponseWriter, r *http.Request) {
+	s.mu.Lock()
+	analysis := s.analysis
+	s.mu.Unlock()
+
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	if analysis == nil || analysis.Triggerable == nil {
+		w.Write([]byte("null"))
+		return
+	}
+	json.NewEncoder(w).Encode(analysis.Triggerable)
+}
+
+// handleAnalysisTimeline 返回缓存的 timeline 数据
+func (s *Server) handleAnalysisTimeline(w http.ResponseWriter, r *http.Request) {
+	s.mu.Lock()
+	analysis := s.analysis
+	s.mu.Unlock()
+
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	if analysis == nil || len(analysis.Timeline) == 0 {
+		w.Write([]byte("null"))
+		return
+	}
+	json.NewEncoder(w).Encode(analysis.Timeline)
+}
+
+// ========== AI 分析 API ==========
+
+func (s *Server) handleAIChat(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "需要 POST", http.StatusMethodNotAllowed)
+		return
+	}
+
+	r.Body = http.MaxBytesReader(w, r.Body, maxRequestBody)
+	var body struct {
+		APIKey   string       `json:"api_key"`
+		Model    string       `json:"model"`
+		Messages []ai.Message `json:"messages"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		http.Error(w, "请求格式错误", http.StatusBadRequest)
+		return
+	}
+	if body.APIKey == "" {
+		http.Error(w, "请输入 API Key", http.StatusBadRequest)
+		return
+	}
+	if body.Model == "" {
+		body.Model = "MiniMax-M2.5"
+	}
+
+	// Build system prompt with forensic context
+	s.mu.Lock()
+	result := s.result
+	analysis := s.analysis
+	s.mu.Unlock()
+
+	systemPrompt := ai.BuildForensicContext(result, analysis)
+
+	// Cap user history at 30 messages
+	userMsgs := body.Messages
+	if len(userMsgs) > 30 {
+		userMsgs = userMsgs[len(userMsgs)-30:]
+	}
+
+	reply, err := ai.ChatCompletion(r.Context(), body.APIKey, body.Model, systemPrompt, userMsgs)
+	if err != nil {
+		http.Error(w, "AI 调用失败: "+err.Error(), http.StatusBadGateway)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"reply": ai.StripThinking(reply),
+	})
+}
+
+func (s *Server) handleAIAnalyze(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "需要 POST", http.StatusMethodNotAllowed)
+		return
+	}
+
+	r.Body = http.MaxBytesReader(w, r.Body, maxRequestBody)
+	var body struct {
+		APIKey string `json:"api_key"`
+		Model  string `json:"model"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		http.Error(w, "请求格式错误", http.StatusBadRequest)
+		return
+	}
+	if body.APIKey == "" {
+		http.Error(w, "请输入 API Key", http.StatusBadRequest)
+		return
+	}
+	if body.Model == "" {
+		body.Model = "MiniMax-M2.5"
+	}
+
+	s.mu.Lock()
+	result := s.result
+	analysis := s.analysis
+	s.mu.Unlock()
+
+	if result == nil && analysis == nil {
+		http.Error(w, "请先执行采集或分析", http.StatusBadRequest)
+		return
+	}
+
+	systemPrompt := ai.BuildForensicContext(result, analysis)
+	messages := []ai.Message{
+		{Role: "user", Content: "综合分析这台主机的安全状态。直接给结论：\n1. 是否被入侵（判定+依据）\n2. 关键发现（列出最重要的 3-5 条）\n3. 处置建议（具体操作步骤）\n4. 需要进一步排查的点"},
+	}
+
+	reply, err := ai.ChatCompletion(r.Context(), body.APIKey, body.Model, systemPrompt, messages)
+	if err != nil {
+		http.Error(w, "AI 调用失败: "+err.Error(), http.StatusBadGateway)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"reply": ai.StripThinking(reply),
+	})
+}
+
 // ========== YARA + 文件浏览 API ==========
 
 // handleCwd 返回服务器当前工作目录
@@ -625,6 +1045,7 @@ func (s *Server) handleYaraScan(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	r.Body = http.MaxBytesReader(w, r.Body, maxRequestBody)
 	var body struct {
 		RulesPath string `json:"rules_path"`
 	}

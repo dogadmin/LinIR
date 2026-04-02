@@ -43,6 +43,9 @@ and cross-source validation.`,
 		newBundleCmd(cfg),
 		newGuiCmd(cfg),
 		newWatchCmd(cfg),
+		newRetainedCmd(cfg),
+		newTriggerableCmd(cfg),
+		newTimelineCmd(cfg),
 	)
 
 	return root

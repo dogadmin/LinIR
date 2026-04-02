@@ -154,6 +154,10 @@ type SystemdUnit struct {
 	User         string
 	WantedBy     string
 	Type         string
+	Restart      string
+	WatchdogSec  string
+	OnCalendar   string
+	OnBootSec    string
 }
 
 // ParseSystemdUnit parses a systemd unit file and extracts key fields.
@@ -193,7 +197,50 @@ func ParseSystemdUnit(path string) (*SystemdUnit, error) {
 			unit.WantedBy = val
 		case "Type":
 			unit.Type = val
+		case "Restart":
+			unit.Restart = val
+		case "WatchdogSec":
+			unit.WatchdogSec = val
+		case "OnCalendar":
+			unit.OnCalendar = val
+		case "OnBootSec":
+			unit.OnBootSec = val
 		}
 	}
 	return unit, scanner.Err()
+}
+
+// ExtractExecTarget extracts the executable file path from a systemd ExecStart
+// value, stripping prefix modifiers (-/@/+/!) and returning the first token.
+func ExtractExecTarget(execStart string) string {
+	if execStart == "" {
+		return ""
+	}
+	s := execStart
+	for len(s) > 0 && (s[0] == '-' || s[0] == '@' || s[0] == '+' || s[0] == '!') {
+		s = s[1:]
+	}
+	fields := strings.Fields(s)
+	if len(fields) == 0 {
+		return ""
+	}
+	return fields[0]
+}
+
+// ExtractCronCommand extracts the first executable from a cron command string,
+// skipping environment variable assignments (FOO=bar).
+func ExtractCronCommand(cmd string) string {
+	cmd = strings.TrimSpace(cmd)
+	for strings.Contains(cmd, "=") && !strings.HasPrefix(cmd, "/") {
+		fields := strings.Fields(cmd)
+		if len(fields) <= 1 || !strings.Contains(fields[0], "=") {
+			break
+		}
+		cmd = strings.Join(fields[1:], " ")
+	}
+	fields := strings.Fields(cmd)
+	if len(fields) == 0 {
+		return ""
+	}
+	return fields[0]
 }
