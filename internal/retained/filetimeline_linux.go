@@ -74,5 +74,5 @@ func fillStatFields(entry *model.RetainedFileEntry, info os.FileInfo) {
 	}
 	entry.UID = int(stat.Uid)
 	entry.GID = int(stat.Gid)
-	entry.ChangeTime = time.Unix(stat.Ctim.Sec, stat.Ctim.Nsec)
+	entry.ChangeTime = time.Unix(int64(stat.Ctim.Sec), int64(stat.Ctim.Nsec))
 }

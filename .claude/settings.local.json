@@ -1,0 +1,21 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(grep -r \"State\\\\|state\\\\|Status\\\\|status\" /c/Users/Administrator/Desktop/LinIR/internal/model/*.go)",
+      "Bash(grep:*)",
+      "Bash(wc -l internal/**/*.go)",
+      "Bash(wc -l pkg/**/*.go)",
+      "Bash(wc:*)",
+      "Bash(curl -s https://api.minimax.chat/v1/text/chatcompletion_v2)",
+      "Bash(curl -s https://api.minimax.chat/v1/text/chatcompletion_pro)",
+      "Bash(ls /tmp/*.txt)",
+      "Bash(echo \"EXIT_CODE=$?\")",
+      "Bash(staticcheck ./...)",
+      "WebFetch(domain:platform.minimaxi.com)",
+      "Bash(curl:*)",
+      "Bash(ls -la linir-*)",
+      "Bash(ls:*)",
+      "Bash(GOOS=linux GOARCH=arm GOARM=7 go build ./...)"
+    ]
+  }
+}

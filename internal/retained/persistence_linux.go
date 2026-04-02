@@ -13,5 +13,5 @@ func getFileCtime(info os.FileInfo) time.Time {
 	if !ok {
 		return time.Time{}
 	}
-	return time.Unix(stat.Ctim.Sec, stat.Ctim.Nsec)
+	return time.Unix(int64(stat.Ctim.Sec), int64(stat.Ctim.Nsec))
 }
